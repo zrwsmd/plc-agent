@@ -58,6 +58,8 @@ assert.equal(service.canWriteContent(`${code}\n`), false);
 assert.deepEqual(service.getValidationCandidates()[0], {
   hash: codeHash,
   declarations: [{ category: 'pou', kind: 'PROGRAM', name: 'PUMP', line: 1 }],
+  bytes: Buffer.byteLength(code, 'utf8'),
+  lines: code.split(/\r?\n/u).length,
   status: 'passed',
   errorCount: 0,
   source: 'manual',

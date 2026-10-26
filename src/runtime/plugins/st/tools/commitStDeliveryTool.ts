@@ -40,6 +40,15 @@ export function createStDeliveryCommitTool(ctx: StToolBuildContext) {
               "plan",
             );
           }
+          const candidateCheck = validationService.checkDeliveryCandidate(contentHash);
+          if (!candidateCheck.accepted) {
+            return failed(
+              candidateCheck.reason ??
+                "当前候选不能作为正式 ST 交付，请重新提交完整源码并先通过校验。",
+              "plan",
+              "none",
+            );
+          }
           if (
             requiresStRuntimeProgram &&
             !validationService.hasValidatedProgram(contentHash)

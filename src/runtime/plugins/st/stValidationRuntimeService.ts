@@ -41,11 +41,21 @@ export type StValidationCandidateSource =
 export type StValidationCandidate = {
   hash: string;
   declarations: StDeclaration[];
+  /** Source size captured at validation time; used to detect probe candidates. */
+  bytes?: number;
+  lines?: number;
   status: "passed" | "failed";
   errorCount: number;
   source: StValidationCandidateSource;
   targetLabel?: string;
   sequence: number;
+};
+
+export type StDeliveryCandidateCheck = {
+  accepted: boolean;
+  candidate?: StValidationCandidate;
+  baseline?: StValidationCandidate;
+  reason?: string;
 };
 
 export type StPersistedWriteSource =
@@ -484,6 +494,8 @@ export class StValidationRuntimeService {
     const candidate: StValidationCandidate = {
       hash: result.hash ?? hashStContent(content),
       declarations: identifyStDeclarations(content),
+      bytes: Buffer.byteLength(content, "utf8"),
+      lines: content.split(/\r?\n/u).length,
       status: result.status,
       errorCount: result.errorCount,
       source: result.source,
@@ -496,6 +508,69 @@ export class StValidationRuntimeService {
 
   getValidationCandidates(): readonly StValidationCandidate[] {
     return this.state.candidates;
+  }
+
+  /**
+   * A compiler-successful candidate is not automatically a delivery-ready
+   * candidate. If a failed full draft is followed by a much smaller probe,
+   * block the probe from becoming the formal delivery merely because it
+   * happens to parse. This is intentionally domain-neutral: it compares the
+   * candidate lineage recorded in this delivery run, not PLC/business names.
+   */
+  checkDeliveryCandidate(contentHash: string): StDeliveryCandidateCheck {
+    const candidate = this.state.candidates
+      .slice()
+      .reverse()
+      .find((item) => item.hash === contentHash.trim() && item.status === "passed");
+    if (!candidate) {
+      return {
+        accepted: false,
+        reason: "正式交付候选没有对应的成功校验记录；请先校验准备写入的完整源码。",
+      };
+    }
+
+    const candidateBytes = candidate.bytes;
+    if (!candidateBytes || candidateBytes <= 0) {
+      // Old persisted runs did not record source size. Preserve compatibility
+      // for them; newly validated candidates always carry the metadata.
+      return { accepted: true, candidate };
+    }
+
+    const failedCandidates = this.state.candidates.filter((item) =>
+      item.status === "failed" &&
+      item.sequence < candidate.sequence &&
+      typeof item.bytes === "number" &&
+      item.bytes > 0,
+    );
+    const baseline = failedCandidates
+      .slice()
+      .sort((left, right) => (right.bytes ?? 0) - (left.bytes ?? 0))[0];
+    if (!baseline?.bytes) return { accepted: true, candidate };
+
+    const ratio = candidateBytes / baseline.bytes;
+    const primary = candidate.declarations[0];
+    const baselinePrimary = baseline.declarations[0];
+    const declarationChanged = !!primary && !!baselinePrimary && (
+      primary.category !== baselinePrimary.category ||
+      primary.kind !== baselinePrimary.kind ||
+      primary.name !== baselinePrimary.name
+    );
+    const extremeShrink = baseline.bytes >= 256 && ratio < 0.25;
+    const structuralShrink = baseline.bytes >= 256 &&
+      ratio < 0.5 &&
+      (declarationChanged || candidate.declarations.length < baseline.declarations.length);
+    if (!extremeShrink && !structuralShrink) {
+      return { accepted: true, candidate, baseline };
+    }
+
+    return {
+      accepted: false,
+      candidate,
+      baseline,
+      reason:
+        "当前候选虽然通过 ST 语法/类型校验，但相对本轮之前失败的完整草稿大幅缩短，" +
+        "疑似只是探测编译器规则的最小样例，不能自动作为正式交付。请基于原始完整需求重新提交完整源码后再调用 commit_st_delivery。",
+    };
   }
 
   /**

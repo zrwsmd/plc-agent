@@ -206,4 +206,37 @@ await withSession(async ({ invoke, service, fileExists }) => {
   assert.equal(await fileExists('PressureFilterScale.st'), false);
 });
 
+await withSession(async ({ invoke, fileExists }) => {
+  const fullDraft = [
+    'PROGRAM PackingShiftCounter',
+    'VAR',
+    ...Array.from({ length: 28 }, (_, index) => `  counter${index} : DINT;`),
+    'END_VAR',
+    'counter0 := ;',
+    // Deliberately incomplete: this represents the full business draft that
+    // failed validation before a model started probing type rules.
+  ].join('\n');
+  const probe = [
+    'PROGRAM P',
+    'VAR r : REAL; END_VAR',
+    'r := 1.0 + 2.0;',
+    'END_PROGRAM',
+  ].join('\n');
+  const failedDraft = await invoke('validate_st_code', { code: fullDraft });
+  assert.equal(failedDraft.ok, false, '完整草稿应先留下失败校验记录');
+  const passedProbe = await invoke('validate_st_code', { code: probe });
+  assert.equal(passedProbe.ok, true, '最小探针本身可能通过语法校验');
+  const commit = await invoke('commit_st_delivery', {
+    path: 'PackingShiftCounter.st',
+    contentHash: passedProbe.data.validatedContentHash,
+  });
+  assert.equal(commit.ok, false, '大幅缩短的探针不得直接成为正式交付');
+  assert.match(commit.error, /大幅缩短|最小样例|完整源码/u);
+  assert.equal(
+    await fileExists('PackingShiftCounter.st'),
+    false,
+    '探针被拒绝后不得写盘',
+  );
+});
+
 console.log('st delivery authorization tests passed');
