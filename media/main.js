@@ -2229,12 +2229,23 @@ function scrollBottom() {
   });
 }
 
+function isRetryRequest(text) {
+  return /^(?:重试|重试本轮|重新尝试|再次尝试|retry)[。！!,.，、\s]*$/iu.test(String(text ?? '').trim());
+}
+
 // ---------- 发送 ----------
 
 function send() {
   if (runtimeMode !== 'idle') return;
   const text = inputEl.value.trim();
   if (!text) return;
+  if (canRetry && isRetryRequest(text)) {
+    clearPauseNotice();
+    inputEl.value = '';
+    autoGrow();
+    vscode.postMessage({ type: 'retry' });
+    return;
+  }
   clearPauseNotice();
   inputEl.value = '';
   autoGrow();

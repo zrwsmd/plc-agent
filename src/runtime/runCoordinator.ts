@@ -137,6 +137,7 @@ type PreflightStatus = 'started' | 'completed' | 'failed' | 'paused';
 
 const MAX_REPLAYABLE_PROTOCOL_EVENTS = 200;
 const MAX_TEAM_REVIEW_REVISIONS = 2;
+const MAX_FAILED_TURN_SUMMARY_CHARS = 2_000;
 const REPLAYABLE_PROTOCOL_EVENT_TYPES = new Set<AgentProtocolEvent['type']>([
   'run.started',
   'tool.started',
@@ -153,6 +154,19 @@ const REPLAYABLE_PROTOCOL_EVENT_TYPES = new Set<AgentProtocolEvent['type']>([
   'run.failed',
   'run.cancelled',
 ]);
+
+/**
+ * Keep a failed request visible in the durable conversation without replaying
+ * its raw SDK/tool items. The raw items belong to one execution attempt; this
+ * message is ordinary, non-executable conversation context.
+ */
+export function renderFailedTurnSummary(error: string, status = 'failed'): string {
+  const detail = String(error || '本轮未完成').trim().slice(0, MAX_FAILED_TURN_SUMMARY_CHARS);
+  const state = status === 'paused'
+    ? '本轮已暂停，可从保存的断点继续或重试。'
+    : '本轮未完成，不能视为已交付。';
+  return `【运行记录】${state}\n失败原因：${detail}\n原始工具调用已与后续新任务隔离；如需再次执行，请使用本轮重试。`;
+}
 
 interface PendingClarification {
   runId: string;
@@ -853,6 +867,7 @@ export class RunCoordinator {
         error: active.error,
         usage: active.usage,
       });
+      await this.persistFailedTurnSummary(active);
       await this.store.update(active);
       await this.replayHistory(generation);
       if (this.isClearing(generation)) return;
@@ -1769,6 +1784,7 @@ export class RunCoordinator {
     // safely repeats this idempotent truncation.
     await this.session.truncate(run.sessionItemCountBefore);
     run.status = 'cancelled';
+    run.error = '本轮已取消';
     run.result = createAgentResult({
       status: 'cancelled',
       reason: 'user_cancelled',
@@ -1779,6 +1795,7 @@ export class RunCoordinator {
     run.approvals = [];
     if (run.plan) run.plan = failTaskPlan(run.plan);
     if (run.teamTask) run.teamTask = failTeamTask(run.teamTask);
+    await this.persistFailedTurnSummary(run);
     await this.store.update(run);
     await this.audit('run_cancelled', run);
     if (notify) {
@@ -1813,6 +1830,7 @@ export class RunCoordinator {
     const hasSdkState = typeof active.state === 'string' && active.state.length > 0;
     if (!hasSdkState) await this.session.truncate(active.sessionItemCountBefore);
     active.status = 'paused';
+    if (!active.error) active.error = '本轮已暂停';
     active.canContinue = true;
     active.result = createAgentResult({
       status: 'cancelled',
@@ -1822,6 +1840,7 @@ export class RunCoordinator {
     if (!hasSdkState) active.approvals = [];
     if (active.plan) active.plan = pauseTaskPlan(active.plan);
     if (active.teamTask) active.teamTask = pauseTeamTask(active.teamTask);
+    if (!hasSdkState) await this.persistFailedTurnSummary(active);
     await this.store.update(active);
     await this.audit('run_paused', active, {
       strategy: hasSdkState ? 'sdk_state' : 'safe_restart',
@@ -2233,8 +2252,20 @@ export class RunCoordinator {
 
       // Session rollback must happen before the run becomes terminal. If the
       // host crashes between these writes, startup still sees an active run.
-      if ((result.status === 'cancelled' && !resumable) || result.status === 'refused') {
+      const rolledBackTurn =
+        (result.status === 'cancelled' && !resumable) ||
+        result.status === 'refused' ||
+        result.status === 'failed';
+      if (rolledBackTurn) {
         await rollbackSessionBoundary();
+        if (this.isRunInvalidated(runGeneration)) return;
+        if (result.status === 'cancelled' && !run.error) run.error = '本轮已取消';
+        const refusalReason = result.status === 'refused'
+          ? result.result.status === 'refused'
+            ? result.result.reason
+            : '用户拒绝了工具调用'
+          : undefined;
+        await this.persistFailedTurnSummary(run, refusalReason);
         if (this.isRunInvalidated(runGeneration)) return;
       }
       await this.store.update(run);
@@ -2361,7 +2392,8 @@ export class RunCoordinator {
       const hasSdkState = typeof errorState === 'string' && errorState.length > 0;
       if (this.isRunInvalidated(runGeneration)) return;
       const executorAlreadyCompleted = run.teamTask?.nodes.find((node) => node.id === 'executor')?.status === 'completed';
-      if (!hasSdkState && !executorAlreadyCompleted) {
+      const rolledBackTurn = !hasSdkState && !executorAlreadyCompleted;
+      if (rolledBackTurn) {
         await rollbackSessionBoundary();
         if (this.isRunInvalidated(runGeneration)) return;
       }
@@ -2384,6 +2416,11 @@ export class RunCoordinator {
       }
       if (run.teamTask) {
         run.teamTask = continuable ? pauseTeamTask(run.teamTask) : failTeamTask(run.teamTask);
+      }
+      if (rolledBackTurn) {
+        if (cancelled && !run.error) run.error = manuallyPaused ? '本轮已暂停' : '本轮已取消';
+        await this.persistFailedTurnSummary(run);
+        if (this.isRunInvalidated(runGeneration)) return;
       }
       await this.store.update(run);
       if (this.isRunInvalidated(runGeneration)) return;
@@ -3076,6 +3113,26 @@ export class RunCoordinator {
     );
     if (this.isClearing(generation)) return;
     this.emit({ type: 'history', messages, events });
+  }
+
+  private async persistFailedTurnSummary(
+    run: DurableRunRecord,
+    errorOverride?: string,
+  ): Promise<void> {
+    try {
+      await this.session.addItems([
+        { type: 'message', role: 'user', content: run.userText } as unknown as AgentInputItem,
+        {
+          type: 'message',
+          role: 'assistant',
+          content: renderFailedTurnSummary(errorOverride ?? run.error ?? run.output, run.status),
+        } as unknown as AgentInputItem,
+      ]);
+    } catch (error) {
+      this.writeLog(
+        `[session] 失败摘要写入失败: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   private async audit(type: AuditEventType, run: DurableRunRecord, metadata?: Record<string, unknown>): Promise<void> {

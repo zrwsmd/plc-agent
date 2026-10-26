@@ -1980,7 +1980,12 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
   if (!test.events.some((event) => event.type === 'agentEvent' && event.event.type === 'run.started')) {
     throw new Error('stable run.started protocol event missing');
   }
-  if ((await test.session.getItems()).length !== 0) throw new Error('coordinator did not rollback the early-stop session');
+  const earlyStopHistory = await test.session.getItems();
+  if (
+    earlyStopHistory.length !== 2 ||
+    earlyStopHistory[0]?.content !== 'cancel me' ||
+    !String(earlyStopHistory[1]?.content ?? '').includes('本轮已暂停')
+  ) throw new Error('coordinator did not preserve a non-executable early-stop summary');
   const paused = await test.store.getLast();
   if (paused?.status !== 'paused' || paused.canContinue !== true || paused.state !== undefined) {
     throw new Error('early stop was not persisted as a safe continuation');
@@ -2051,8 +2056,13 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
   if (paused?.status !== 'paused' || paused.state !== undefined || !paused.canContinue) {
     throw new Error('state-less gateway failure was not preserved for safe continuation');
   }
-  if ((await test.session.getItems()).length !== 0) {
-    throw new Error('state-less gateway failure did not rollback its partial session');
+  const boundaryHistory = await test.session.getItems();
+  if (
+    boundaryHistory.length !== 2 ||
+    boundaryHistory[0]?.content !== 'gateway boundary resume' ||
+    !String(boundaryHistory[1]?.content ?? '').includes('fetch failed')
+  ) {
+    throw new Error('state-less gateway failure did not preserve a non-executable summary');
   }
   await test.coordinator.continue('key');
   const completed = await test.store.getLast();
@@ -2078,8 +2088,13 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
   if (paused?.status !== 'paused' || paused.state !== undefined || !paused.canContinue) {
     throw new Error('terminated stream failure was not preserved for safe continuation');
   }
-  if ((await test.session.getItems()).length !== 0) {
-    throw new Error('terminated stream failure did not rollback its partial session');
+  const terminatedHistory = await test.session.getItems();
+  if (
+    terminatedHistory.length !== 2 ||
+    terminatedHistory[0]?.content !== 'stream terminated' ||
+    !String(terminatedHistory[1]?.content ?? '').includes('流式连接中断')
+  ) {
+    throw new Error('terminated stream failure did not preserve a non-executable summary');
   }
   if (!/流式连接中断/.test(paused.error || '')) {
     throw new Error(`terminated stream failure used an unclear error message: ${paused.error}`);
@@ -2206,10 +2221,26 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
   await test.coordinator.start('retry me', config, 'key');
   const failed = await test.store.getLast();
   if (failed?.status !== 'failed') throw new Error('failed run was not persisted');
+  const failedHistory = await test.session.getItems();
+  if (
+    failedHistory.length !== 2 ||
+    failedHistory[0]?.content !== 'retry me' ||
+    !String(failedHistory[1]?.content ?? '').includes('transient')
+  ) {
+    throw new Error('failed run was not retained as a conversation summary');
+  }
   await test.coordinator.retry('key');
   const completed = await test.store.getLast();
   if (completed?.status !== 'completed' || completed.id === failed.id || completed.operationId !== failed.operationId) {
     throw new Error('retry identity contract is invalid');
+  }
+  const retriedHistory = await test.session.getItems();
+  if (
+    retriedHistory.length !== 2 ||
+    retriedHistory[0]?.content !== 'retry me' ||
+    String(retriedHistory[1]?.content ?? '').includes('transient')
+  ) {
+    throw new Error('retry did not remove the failed summary before rerunning');
   }
 }
 
@@ -2237,7 +2268,12 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
   await fresh.initialize();
   const recovered = await test.store.getLast();
   if (recovered?.id !== running.id || recovered.status !== 'failed') throw new Error('crashed run was not recovered');
-  if ((await freshSession.getItems()).length !== 0) throw new Error('crashed run session was not rolled back');
+  const recoveredHistory = await freshSession.getItems();
+  if (
+    recoveredHistory.length !== 2 ||
+    recoveredHistory[0]?.content !== 'crashed' ||
+    !String(recoveredHistory[1]?.content ?? '').includes('扩展进程在运行期间中断')
+  ) throw new Error('crashed run session did not preserve a non-executable summary');
   if (!freshEvents.some((event) => event.type === 'runRecovered')) throw new Error('recovery event missing');
 }
 
@@ -2328,7 +2364,12 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
   const refused = await test.store.getLast();
   if (refused?.status !== 'refused') throw new Error('refused run was not persisted');
   if (refused?.error !== undefined) throw new Error('refused run was incorrectly marked as an error');
-  if ((await test.session.getItems()).length !== 0) throw new Error('refused session was not rolled back');
+  const refusedHistory = await test.session.getItems();
+  if (
+    refusedHistory.length !== 2 ||
+    refusedHistory[0]?.content !== '拒绝写文件' ||
+    !String(refusedHistory[1]?.content ?? '').includes('用户拒绝了工具调用: write_file')
+  ) throw new Error('refused session did not preserve a non-executable summary');
   if (!test.events.some((event) => event.type === 'refused')) throw new Error('refused runtime event missing');
   if (!test.events.some((event) => event.type === 'agentEvent' && event.event.type === 'run.refused')) {
     throw new Error('run.refused protocol event missing');
