@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
-import { unwrapStructuredMessage } from './agent.testbundle.mjs';
+import {
+  composeFinalMessage,
+  isPseudoToolCallMessage,
+  unwrapStructuredMessage,
+} from './agent.testbundle.mjs';
 
 /* ------------------------------------------------------------------ */
 /* 最终文案守卫：模型/收尾器把整段 JSON 当 message 返回时不能直接展示      */
@@ -9,6 +13,17 @@ import { unwrapStructuredMessage } from './agent.testbundle.mjs';
 assert.equal(unwrapStructuredMessage('已完成：ST 程序已交付。'), '已完成：ST 程序已交付。');
 assert.equal(unwrapStructuredMessage('  '), '');
 assert.equal(unwrapStructuredMessage(undefined), '');
+
+// Legacy XML tool syntax is model protocol residue, not final user text.
+const pseudoToolCall = `<tool_call>\n<function=validate_st_code>\n<parameter=code>\nPROGRAM Demo\nEND_PROGRAM`;
+assert.equal(isPseudoToolCallMessage(pseudoToolCall), true);
+assert.equal(
+  composeFinalMessage(
+    pseudoToolCall,
+    '已完成正式交付：Demo.st。',
+  ),
+  '已完成正式交付：Demo.st。',
+);
 
 // 标准结构化对象：取内层 message。
 assert.equal(

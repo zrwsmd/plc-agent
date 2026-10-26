@@ -6,6 +6,7 @@ import {
 
 type PipelineToolRecord = {
   name: string;
+  args?: string;
   result: ToolResult;
 };
 
@@ -42,15 +43,39 @@ export class PipelineStageRuntime {
   guardToolCall(
     toolName: string,
     records: readonly PipelineToolRecord[],
+    input?: unknown,
   ): string | undefined {
     const transitions = (this.plan?.resultTransitions ?? [])
       .filter((transition) => transition.toToolName === toolName);
+    const currentFingerprint = input === undefined
+      ? undefined
+      : this.toolInputFingerprint({
+        toolName,
+        args: typeof input === "string" ? input : JSON.stringify(input),
+      });
     for (const transition of transitions) {
       const previous = [...records]
         .reverse()
         .find((record) => record.name === transition.fromToolName);
       if (!previous) continue;
       if (transition.canTransition(previous.result)) return undefined;
+      // A stage may be revisited with a materially different candidate. This
+      // is especially important for validation tools: a successful check of
+      // one draft must not block a later check of the corrected full draft.
+      // Exact repeats remain governed by the duplicate fingerprint layer.
+      if (
+        transition.fromToolName === toolName &&
+        currentFingerprint &&
+        previous.args
+      ) {
+        const previousFingerprint = this.toolInputFingerprint({
+          toolName: previous.name,
+          args: previous.args,
+        });
+        if (previousFingerprint && previousFingerprint !== currentFingerprint) {
+          return undefined;
+        }
+      }
       const retryTransition = transitions.find(
         (candidate) =>
           candidate.fromToolName === transition.fromToolName &&

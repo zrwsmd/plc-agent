@@ -421,10 +421,24 @@ function cleanFinalMessage(value: string | undefined): string {
   return value ? stripHistoricalContextMarker(value).trim() : "";
 }
 
+/**
+ * Some gateways/models emit legacy XML-style tool syntax as ordinary text
+ * when the runtime has no matching tool in the request. It is an internal
+ * protocol artifact, never a user-facing final answer.
+ */
+export function isPseudoToolCallMessage(message: string): boolean {
+  const text = String(message ?? "").trim();
+  if (!text) return false;
+  if (/<\s*tool_call\b[^>]*>/iu.test(text)) return true;
+  return /<\s*function\s*=\s*[^>]+>/iu.test(text) &&
+    /<\s*parameter(?:\s*=\s*[^>]+)?\s*>/iu.test(text);
+}
+
 function isInternalToolArtifactComplaint(message: string): boolean {
   const text = message.trim();
   if (!text) return false;
-  return /Tool call ["'][^"']+["'].*no available artifacts/is.test(text) ||
+  return isPseudoToolCallMessage(text) ||
+    /Tool call ["'][^"']+["'].*no available artifacts/is.test(text) ||
     /tool returned an empty dict or a non-dict value/is.test(text) ||
     /unexpected response format.*tool implementation/is.test(text) ||
     /文件被截断.*重新写入/u.test(text) ||
@@ -727,6 +741,10 @@ export async function runAgent(
     if (workflowToolNames && !workflowToolNames.has(toolName)) {
       return undefined;
     }
+    // Keep read/plan tools with no external effect available for a final
+    // verification pass. Side-effecting tools remain unavailable after the
+    // workflow has produced its delivery artifact.
+    if (toolCatalog.get(toolName)?.effect === "none") return undefined;
     return `运行时工作流“${workflowRuntime.title}”已经完成，禁止再次调用 ${toolName} 以避免重复副作用；请直接基于已完成的工具回执给出最终总结。`;
   };
   let historicalArgumentRejectionLogged = false;
@@ -744,6 +762,7 @@ export async function runAgent(
     const pipelineReason = pipelineStageRuntime.guardToolCall(
       toolName,
       [...historicalToolResults, ...toolResults.values()],
+      input,
     );
     if (pipelineReason) return pipelineReason;
     return toolCallDeduper.guard(toolName, input);
@@ -1561,17 +1580,21 @@ export async function runAgent(
     if (!workflowCompletionLogged) {
       workflowCompletionLogged = true;
       agentLog(
-        `[workflow] ${workflowRuntime.title} 已完成，后续 workflow 工具调用将被阻止以避免重复执行`,
+        `[workflow] ${workflowRuntime.title} 已完成，后续副作用 workflow 工具调用将被阻止以避免重复执行`,
       );
     }
-    // 摘掉工具而不是掐断这一轮：模型还会被叫一次，但它没有工具可调，
-    // 只能把这一轮写成总结，用户看到的就是模型自己写的话，不是工作流自带的完成语。
+    // 只摘掉有副作用工具，保留无副作用的核验/只读工具。这样模型如果
+    // 发现需要用另一份完整候选重新校验，仍能真实调用验证工具；写入类
+    // 工具则不会在交付完成后再次执行。
     if (!completionCut) {
       completionCut = true;
       agentLog(
-        `[workflow] ${workflowRuntime.title} 已交付完成，收起工具，让模型直接写总结`,
+        `[workflow] ${workflowRuntime.title} 已交付完成，收起副作用工具，保留无副作用核验工具`,
       );
-      agent.tools = [];
+      agent.tools = tools.filter((tool) => {
+        const name = toolNameOf(tool);
+        return typeof name === "string" && toolCatalog.get(name)?.effect === "none";
+      });
     }
   };
 
@@ -1686,7 +1709,8 @@ export async function runAgent(
   const synthesizeStructuredOutputFromEvidence = (): IndustrialAgentOutput | undefined => {
     const rawOutput = output.trim();
     const usableModelMessage = rawOutput &&
-      !isInvalidStructuredOutputText(rawOutput)
+      !isInvalidStructuredOutputText(rawOutput) &&
+      !isPseudoToolCallMessage(rawOutput)
       ? rawOutput
       : undefined;
     const message = composeFinalMessage(
@@ -2157,17 +2181,19 @@ export async function runAgent(
           // 什么也拿不到，只会把模型自己写的总结换成账本拼出来的话。
           // 所以这里不做 schema 校验，正文照收；交付成不成立交给完成门控判。
           const coerced = coerceIndustrialAgentOutput(finalOutput);
-          if (coerced) {
+          if (coerced && !isPseudoToolCallMessage(coerced.message)) {
             structuredOutput = sanitizeAssistantOutput(coerced);
             agentLog("[output] 交付轮按正文收下，不再要求结构化输出");
           } else {
             finalizerRequired = true;
+            agentLog("[output] 检测到伪工具调用文本，不作为最终正文");
           }
         } else {
           finalizerRequired = true;
           structuredOutput =
             typeof finalOutput === "string" &&
-            !isInvalidStructuredOutputText(finalOutput)
+            !isInvalidStructuredOutputText(finalOutput) &&
+            !isPseudoToolCallMessage(finalOutput)
               ? coerceIndustrialAgentOutput(finalOutput)
               : undefined;
           if (!structuredOutput) {
@@ -2199,7 +2225,8 @@ export async function runAgent(
       output.trim()
     ) {
       finalizerRequired = !deliveryBodyIsFinal();
-      const invalidStructuredText = isInvalidStructuredOutputText(output);
+      const invalidStructuredText = isInvalidStructuredOutputText(output) ||
+        isPseudoToolCallMessage(output);
       if (!invalidStructuredText) {
         structuredOutput = coerceIndustrialAgentOutput(output) ?? {
           message: stripHistoricalContextMarker(output),
@@ -2656,7 +2683,8 @@ export async function runAgent(
       const authoritativeMessage = authoritativeWorkflowMessage();
       const fallbackMessage = fallbackRequiredToolMessage();
       structuredOutput = sanitizeAssistantOutput(structuredOutput);
-      const rawMessage = structuredOutput.message.trim()
+      const rawMessage = structuredOutput.message.trim() &&
+        !isPseudoToolCallMessage(structuredOutput.message)
         ? structuredOutput.message
         : "";
       const message = composeFinalMessage(
@@ -2664,7 +2692,9 @@ export async function runAgent(
         authoritativeMessage,
         fallbackMessage || fallbackDeliveryMessage(),
       ) ??
-        stripHistoricalContextMarker(fallbackMessage ?? structuredOutput.message);
+        (isPseudoToolCallMessage(structuredOutput.message)
+          ? (fallbackMessage || fallbackDeliveryMessage() || "")
+          : stripHistoricalContextMarker(structuredOutput.message));
       const structuredProjection = projectAgentOutput(
         industrialAgentOutputDefinition,
         structuredOutput,

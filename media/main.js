@@ -887,8 +887,11 @@ function sanitizeAssistantText(text) {
     /^Tool call validation failed due to the following issue:/i,
     /^Please approve this write operation to save\b/i,
     /^Tool call ["'][^"']+["'] .* has no available artifacts\./i,
+    /<\s*tool_call\b/i,
   ];
-  return internalPatterns.some((pattern) => pattern.test(trimmed))
+  const pseudoToolMarkup = /<\s*function\s*=\s*[^>]+>/i.test(trimmed) &&
+    /<\s*parameter(?:\s*=\s*[^>]+)?\s*>/i.test(trimmed);
+  return internalPatterns.some((pattern) => pattern.test(trimmed)) || pseudoToolMarkup
     ? ''
     : withoutHistoricalMarker;
 }

@@ -117,6 +117,32 @@ import {
   if (firstVisible || !secondSuppressed || !runtime.shouldSuppressCompleted('st-2')) {
     throw new Error('ST pipeline duplicate suppression failed');
   }
+
+  const successfulValidation = {
+    name: 'validate_st_code',
+    args: JSON.stringify({ code: 'PROGRAM Old\nEND_PROGRAM' }),
+    result: {
+      ok: true,
+      data: { errorCount: 0, validatedContentHash: 'old' },
+      diagnostics: [],
+      effect: 'none',
+      risk: 'plan',
+    },
+  };
+  if (runtime.guardToolCall(
+    'validate_st_code',
+    [successfulValidation],
+    { code: 'PROGRAM New\nEND_PROGRAM' },
+  )) {
+    throw new Error('ST pipeline blocked a changed candidate after a successful validation');
+  }
+  if (!runtime.guardToolCall(
+    'validate_st_code',
+    [successfulValidation],
+    { code: 'PROGRAM Old\nEND_PROGRAM' },
+  )) {
+    throw new Error('ST pipeline allowed an unchanged validation candidate to bypass its stage guard');
+  }
 }
 
 {
