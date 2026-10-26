@@ -831,22 +831,268 @@ export function projectNewTurnSessionHistory(
 }
 
 const MAX_STRUCTURED_UNWRAP_DEPTH = 4;
+const CLASSIFIER_TOOL_RECORD_LIMIT = 12;
+const CLASSIFIER_TOOL_TARGET_MAX = 80;
+const CLASSIFIER_TOOL_CALL_ITEM_TYPES = new Set([
+  "function_call",
+  "tool_call",
+  "computer_call",
+  "shell_call",
+  "apply_patch_call",
+  "hosted_tool_call",
+  "mcp_call",
+  "tool_search_call",
+]);
+
+interface ClassifierToolEvent {
+  name: string;
+  callId?: string;
+  target?: string;
+  outcome?: "ok" | "failed";
+}
 
 /**
  * Project history for the auxiliary classifiers (task plan, delivery contract,
  * workflow route, team route).
  *
- * Those roles only pick a route; they must not imitate the main agent. Durable
- * history stores each finished turn as the raw `IndustrialAgentOutput` JSON, so
- * feeding it verbatim gives the model a much stronger pattern than the schema
- * instruction in its prompt and it answers in the agent's shape instead — which
- * then fails validation. Unwrapping it back to the plain message text keeps the
- * conversation (so "it" still has a referent) without the format contamination.
+ * Those roles only pick a route; they must not imitate the main agent. Two
+ * things in durable history push them the wrong way:
+ *
+ * 1. Each finished turn is stored as the raw `IndustrialAgentOutput` JSON, so
+ *    feeding it verbatim gives the model a much stronger pattern than the
+ *    schema instruction in its prompt and it answers in the agent's shape.
+ * 2. Each finished turn also stores its tool calls and tool receipts. A model
+ *    that sees "assistant called a tool, tool returned a result" right before
+ *    the new request tends to continue that turn instead of routing it, and a
+ *    role that has no tools bound can only imitate the call in plain text.
+ *
+ * So the projection keeps the ordinary conversation and replaces the executable
+ * tool trail with a short plain-text record of what the previous turns did.
+ * The record is deliberately worded as history: it must never read as evidence
+ * that the current turn already ran anything.
  */
 export function projectHistoryForClassifier(
   items: readonly AgentInputItem[],
 ): AgentInputItem[] {
-  return items.map(unwrapStructuredAssistantMessage);
+  const events: ClassifierToolEvent[] = [];
+  const conversation: AgentInputItem[] = [];
+  for (const item of items) {
+    events.push(...classifierToolCalls(item));
+    const outcome = classifierToolOutcome(item);
+    if (outcome) attachClassifierToolOutcome(events, item, outcome);
+    if (isToolHistoryItem(item)) {
+      const textOnly = assistantMessageWithoutToolCalls(item);
+      if (textOnly) conversation.push(unwrapStructuredAssistantMessage(textOnly));
+      continue;
+    }
+    conversation.push(unwrapStructuredAssistantMessage(item));
+  }
+  const tidied = tidyClassifierMessages(conversation);
+  const record = classifierToolRecord(events);
+  if (!record || !tidied.length) return tidied;
+  const last = tidied[tidied.length - 1] as Record<string, unknown>;
+  if (last.role === "assistant") {
+    const text = sessionOutputText(last.content)?.trim() ?? "";
+    tidied[tidied.length - 1] = {
+      ...last,
+      content: text ? `${text}\n${record}` : record,
+    } as unknown as AgentInputItem;
+    return tidied;
+  }
+  tidied.push({
+    type: "message",
+    role: "assistant",
+    content: record,
+  } as unknown as AgentInputItem);
+  return tidied;
+}
+
+function classifierToolCalls(item: AgentInputItem): ClassifierToolEvent[] {
+  const value = item as Record<string, unknown>;
+  const type = typeof value.type === "string" ? value.type : "";
+  const events: ClassifierToolEvent[] = [];
+  if (value.role === "assistant" && Array.isArray(value.tool_calls)) {
+    for (const call of value.tool_calls) {
+      if (!call || typeof call !== "object") continue;
+      const record = call as Record<string, unknown>;
+      const fn =
+        record.function && typeof record.function === "object"
+          ? (record.function as Record<string, unknown>)
+          : record;
+      const name = typeof fn.name === "string" ? fn.name.trim() : "";
+      if (!name) continue;
+      events.push({
+        name,
+        callId: typeof record.id === "string" ? record.id : undefined,
+        target: classifierToolTarget(fn.arguments),
+      });
+    }
+  }
+  if (value.role === "assistant" && value.function_call !== undefined) {
+    const fn =
+      value.function_call && typeof value.function_call === "object"
+        ? (value.function_call as Record<string, unknown>)
+        : {};
+    const name = typeof fn.name === "string" ? fn.name.trim() : "";
+    if (name) {
+      events.push({ name, target: classifierToolTarget(fn.arguments) });
+    }
+  }
+  if (CLASSIFIER_TOOL_CALL_ITEM_TYPES.has(type) && typeof value.name === "string") {
+    const name = value.name.trim();
+    if (name) {
+      events.push({
+        name,
+        callId: typeof value.callId === "string" ? value.callId : undefined,
+        target: classifierToolTarget(value.arguments),
+      });
+    }
+  }
+  return events;
+}
+
+/** Only the primary path-like argument is kept; the record must stay short. */
+function classifierToolTarget(args: unknown): string | undefined {
+  let parsed: unknown = args;
+  if (typeof args === "string") {
+    const trimmed = args.trim();
+    if (!trimmed.startsWith("{")) return undefined;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      return undefined;
+    }
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return undefined;
+  }
+  const record = parsed as Record<string, unknown>;
+  const candidate = record.path ?? record.file ?? record.targetPath;
+  if (typeof candidate !== "string") return undefined;
+  const text = candidate.trim();
+  if (!text) return undefined;
+  return text.length > CLASSIFIER_TOOL_TARGET_MAX
+    ? `…${text.slice(-(CLASSIFIER_TOOL_TARGET_MAX - 1))}`
+    : text;
+}
+
+function classifierToolOutcome(
+  item: AgentInputItem,
+): "ok" | "failed" | undefined {
+  const value = item as Record<string, unknown>;
+  const type = typeof value.type === "string" ? value.type : "";
+  const isReceipt =
+    value.role === "tool" || /(?:_output|_result)$/u.test(type);
+  if (!isReceipt) return undefined;
+  const text =
+    sessionOutputText(value.output ?? value.content)?.trim() ?? "";
+  if (!text.startsWith("{")) return undefined;
+  try {
+    const parsed = JSON.parse(text) as { ok?: unknown };
+    if (parsed.ok === true) return "ok";
+    if (parsed.ok === false) return "failed";
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+function attachClassifierToolOutcome(
+  events: ClassifierToolEvent[],
+  item: AgentInputItem,
+  outcome: "ok" | "failed",
+): void {
+  const value = item as Record<string, unknown>;
+  const callId =
+    typeof value.callId === "string"
+      ? value.callId
+      : typeof value.tool_call_id === "string"
+        ? value.tool_call_id
+        : undefined;
+  if (callId) {
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      if (events[index].callId === callId && !events[index].outcome) {
+        events[index].outcome = outcome;
+        return;
+      }
+    }
+  }
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    if (!events[index].outcome) {
+      events[index].outcome = outcome;
+      return;
+    }
+  }
+}
+
+/**
+ * An assistant turn that called tools usually also carries the sentence the
+ * model wrote before calling. That sentence is ordinary conversation and must
+ * survive; only the callable part is removed.
+ */
+function assistantMessageWithoutToolCalls(
+  item: AgentInputItem,
+): AgentInputItem | undefined {
+  const value = item as Record<string, unknown>;
+  if (value.role !== "assistant") return undefined;
+  if (value.tool_calls === undefined && value.function_call === undefined) {
+    return undefined;
+  }
+  const rest: Record<string, unknown> = { ...value };
+  delete rest.tool_calls;
+  delete rest.function_call;
+  const text = sessionOutputText(rest.content)?.trim() ?? "";
+  if (!text) return undefined;
+  return rest as unknown as AgentInputItem;
+}
+
+/** Drop empty messages and fold adjacent same-role messages into one. */
+function tidyClassifierMessages(
+  items: readonly AgentInputItem[],
+): AgentInputItem[] {
+  const result: AgentInputItem[] = [];
+  for (const item of items) {
+    const value = item as Record<string, unknown>;
+    const isMessage =
+      value.type === "message" || typeof value.role === "string";
+    if (!isMessage) {
+      result.push(item);
+      continue;
+    }
+    const text = sessionOutputText(value.content)?.trim() ?? "";
+    if (!text) continue;
+    const role = typeof value.role === "string" ? value.role : "assistant";
+    const previous = result[result.length - 1] as
+      | Record<string, unknown>
+      | undefined;
+    if (previous && previous.role === role) {
+      const previousText = sessionOutputText(previous.content)?.trim() ?? "";
+      result[result.length - 1] = {
+        ...previous,
+        content: previousText ? `${previousText}\n${text}` : text,
+      } as unknown as AgentInputItem;
+      continue;
+    }
+    result.push(item);
+  }
+  return result;
+}
+
+function classifierToolRecord(events: readonly ClassifierToolEvent[]): string {
+  if (!events.length) return "";
+  const recent = events.slice(-CLASSIFIER_TOOL_RECORD_LIMIT);
+  const omitted = events.length - recent.length;
+  const lines = recent.map((event) => {
+    const target = event.target ? `(${event.target})` : "";
+    const outcome =
+      event.outcome === "ok" ? " 成功" : event.outcome === "failed" ? " 失败" : "";
+    return `- ${event.name}${target}${outcome}`;
+  });
+  const header =
+    omitted > 0
+      ? `（历史工具调用记录，较早的 ${omitted} 次已省略。这是之前轮次发生了什么，不是本轮已经执行。）`
+      : "（历史工具调用记录。这是之前轮次发生了什么，不是本轮已经执行。）";
+  return `${header}\n${lines.join("\n")}`;
 }
 
 function unwrapStructuredAssistantMessage(item: AgentInputItem): AgentInputItem {

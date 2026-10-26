@@ -46,9 +46,57 @@ assert.deepEqual(projectHistoryForClassifier(plain), plain);
 const userItem = [{ type: 'message', role: 'user', content: structured }];
 assert.deepEqual(projectHistoryForClassifier(userItem), userItem);
 
-// 工具链条目不动
-const toolItem = [{ type: 'function_call', name: 'list_files', arguments: '{}' }];
-assert.deepEqual(projectHistoryForClassifier(toolItem), toolItem);
+// 工具链条目不再原样喂给分类器
+const toolOnly = [{ type: 'function_call', name: 'list_files', arguments: '{}' }];
+assert.deepEqual(
+  projectHistoryForClassifier(toolOnly),
+  [],
+  '只有工具条目、没有对话时，不凭空构造开头的 assistant 消息',
+);
+
+// 工具调用与回执压成一行文本记录，挂在最后一条 assistant 消息上
+const withTools = projectHistoryForClassifier([
+  { type: 'message', role: 'user', content: '把结果写到文件里' },
+  {
+    type: 'function_call',
+    callId: 'c1',
+    name: 'write_file',
+    arguments: '{"path":"notes.md","content":"x"}',
+  },
+  { type: 'function_call_output', callId: 'c1', output: '{"ok":true}' },
+  { type: 'message', role: 'assistant', content: '写好了。' },
+]);
+assert.equal(withTools.length, 2, '工具条目不能作为独立消息留下');
+assert.equal(withTools[0].content, '把结果写到文件里');
+assert.equal(withTools[1].content.includes('写好了。'), true);
+assert.equal(withTools[1].content.includes('write_file(notes.md) 成功'), true);
+assert.equal(
+  withTools[1].content.includes('不是本轮已经执行'),
+  true,
+  '记录必须说明这不是本轮已执行',
+);
+
+// assistant 带 tool_calls 时，正文要保留，调用字段要摘掉
+const assistantWithCalls = projectHistoryForClassifier([
+  { type: 'message', role: 'user', content: '继续' },
+  {
+    type: 'message',
+    role: 'assistant',
+    content: '我先读一下。',
+    tool_calls: [
+      { id: 'c2', function: { name: 'read_file', arguments: '{"path":"a.txt"}' } },
+    ],
+  },
+  { role: 'tool', tool_call_id: 'c2', content: '{"ok":false,"error":"missing"}' },
+]);
+assert.equal(assistantWithCalls.length, 2);
+assert.equal(
+  assistantWithCalls[1].tool_calls,
+  undefined,
+  '不能把可执行的工具调用字段喂给分类器',
+);
+assert.equal(assistantWithCalls[1].content.includes('我先读一下。'), true);
+assert.equal(assistantWithCalls[1].content.includes('read_file(a.txt) 失败'), true);
 
 // 带 message 字段但不是结构化输出的 JSON 不动
 const otherJson = [{ type: 'message', role: 'assistant', content: '{"foo":1}' }];
