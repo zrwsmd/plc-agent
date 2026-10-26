@@ -128,6 +128,13 @@ export function renderAvailableToolsPrompt(
   );
 }
 
+/**
+ * Keep in sync with `agentRunItemTypeSchema` in `src/protocol/events.ts`. Both
+ * the `*_output` (SDK) and `*_result` (provider-neutral) spellings are listed,
+ * because the same event reaches history under either name depending on the
+ * route that produced it. A missing entry here means a raw tool event slips
+ * into history projections as if it were ordinary conversation.
+ */
 const TOOL_HISTORY_ITEM_TYPES = new Set([
   "function_call",
   "function_call_output",
@@ -146,8 +153,38 @@ const TOOL_HISTORY_ITEM_TYPES = new Set([
   "hosted_tool_call_output",
   "mcp_call",
   "mcp_call_output",
+  "mcp_call_result",
   "tool_search_call",
   "tool_search_output",
+  "web_search_call",
+  "web_search_output",
+  "program",
+  "program_output",
+]);
+
+/** Call-side item types; their receipts are the `*_output` / `*_result` twins. */
+const TOOL_CALL_ITEM_TYPES = new Set([
+  "function_call",
+  "tool_call",
+  "computer_call",
+  "shell_call",
+  "apply_patch_call",
+  "hosted_tool_call",
+  "mcp_call",
+  "tool_search_call",
+  "web_search_call",
+  "program",
+]);
+
+/**
+ * Classifier-only noise. Reasoning is the main agent's internal monologue and
+ * handoffs belong to another run; neither helps a router pick a route.
+ */
+const CLASSIFIER_DROPPED_ITEM_TYPES = new Set([
+  "reasoning",
+  "handoff_call",
+  "handoff_output",
+  "tool_approval",
 ]);
 
 export const HISTORICAL_CONTEXT_MARKER_TEXT =
@@ -833,16 +870,6 @@ export function projectNewTurnSessionHistory(
 const MAX_STRUCTURED_UNWRAP_DEPTH = 4;
 const CLASSIFIER_TOOL_RECORD_LIMIT = 12;
 const CLASSIFIER_TOOL_TARGET_MAX = 80;
-const CLASSIFIER_TOOL_CALL_ITEM_TYPES = new Set([
-  "function_call",
-  "tool_call",
-  "computer_call",
-  "shell_call",
-  "apply_patch_call",
-  "hosted_tool_call",
-  "mcp_call",
-  "tool_search_call",
-]);
 
 interface ClassifierToolEvent {
   name: string;
@@ -877,6 +904,10 @@ export function projectHistoryForClassifier(
   const events: ClassifierToolEvent[] = [];
   const conversation: AgentInputItem[] = [];
   for (const item of items) {
+    const type = (item as { type?: unknown }).type;
+    if (typeof type === "string" && CLASSIFIER_DROPPED_ITEM_TYPES.has(type)) {
+      continue;
+    }
     events.push(...classifierToolCalls(item));
     const outcome = classifierToolOutcome(item);
     if (outcome) attachClassifierToolOutcome(events, item, outcome);
@@ -892,10 +923,9 @@ export function projectHistoryForClassifier(
   if (!record || !tidied.length) return tidied;
   const last = tidied[tidied.length - 1] as Record<string, unknown>;
   if (last.role === "assistant") {
-    const text = sessionOutputText(last.content)?.trim() ?? "";
     tidied[tidied.length - 1] = {
       ...last,
-      content: text ? `${text}\n${record}` : record,
+      content: appendMessageText(last, record),
     } as unknown as AgentInputItem;
     return tidied;
   }
@@ -905,6 +935,35 @@ export function projectHistoryForClassifier(
     content: record,
   } as unknown as AgentInputItem);
   return tidied;
+}
+
+/**
+ * Append text without flattening existing content parts. Rewriting an array of
+ * parts into a plain string would drop the per-part metadata (for example the
+ * `output_text` annotations) that the provider may still expect back.
+ */
+function appendMessageText(
+  value: Record<string, unknown>,
+  extra: string,
+): unknown {
+  const content = value.content;
+  if (Array.isArray(content)) {
+    const partType = value.role === "user" ? "input_text" : "output_text";
+    return [...content, { type: partType, text: extra }];
+  }
+  const text = typeof content === "string" ? content : "";
+  return text ? `${text}\n${extra}` : extra;
+}
+
+/**
+ * A message is empty only when it carries nothing at all. An image-only user
+ * turn has no extractable text but still matters to the conversation.
+ */
+function messageHasPayload(value: Record<string, unknown>): boolean {
+  const content = value.content;
+  if (typeof content === "string") return content.trim().length > 0;
+  if (Array.isArray(content)) return content.length > 0;
+  return content !== undefined && content !== null;
 }
 
 function classifierToolCalls(item: AgentInputItem): ClassifierToolEvent[] {
@@ -938,17 +997,26 @@ function classifierToolCalls(item: AgentInputItem): ClassifierToolEvent[] {
       events.push({ name, target: classifierToolTarget(fn.arguments) });
     }
   }
-  if (CLASSIFIER_TOOL_CALL_ITEM_TYPES.has(type) && typeof value.name === "string") {
-    const name = value.name.trim();
-    if (name) {
-      events.push({
-        name,
-        callId: typeof value.callId === "string" ? value.callId : undefined,
-        target: classifierToolTarget(value.arguments),
-      });
-    }
+  if (TOOL_CALL_ITEM_TYPES.has(type)) {
+    const name =
+      typeof value.name === "string" && value.name.trim()
+        ? value.name.trim()
+        : classifierToolNameFromType(type);
+    events.push({
+      name,
+      callId: typeof value.callId === "string" ? value.callId : undefined,
+      target: classifierToolTarget(value.arguments),
+    });
   }
   return events;
+}
+
+/**
+ * Hosted events such as `web_search_call` and `program` carry no tool name.
+ * The record still needs a label, so fall back to the event type itself.
+ */
+function classifierToolNameFromType(type: string): string {
+  return type.replace(/_(?:call|output|result)$/u, "") || type;
 }
 
 /** Only the primary path-like argument is kept; the record must stay short. */
@@ -1011,15 +1079,23 @@ function attachClassifierToolOutcome(
         : undefined;
   if (callId) {
     for (let index = events.length - 1; index >= 0; index -= 1) {
-      if (events[index].callId === callId && !events[index].outcome) {
-        events[index].outcome = outcome;
+      const event = events[index];
+      if (event.callId === callId && !event.outcome) {
+        event.outcome = outcome;
         return;
       }
     }
+    // The receipt names a call that history does not contain. Guessing which
+    // call it belongs to would report one tool's failure against another, so
+    // the outcome stays unknown.
+    return;
   }
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    if (!events[index].outcome) {
-      events[index].outcome = outcome;
+  // Older entries carry no call id, so order is the only signal available:
+  // take the oldest call that is still waiting for a receipt.
+  for (let index = 0; index < events.length; index += 1) {
+    const event = events[index];
+    if (!event.callId && !event.outcome) {
+      event.outcome = outcome;
       return;
     }
   }
@@ -1041,12 +1117,11 @@ function assistantMessageWithoutToolCalls(
   const rest: Record<string, unknown> = { ...value };
   delete rest.tool_calls;
   delete rest.function_call;
-  const text = sessionOutputText(rest.content)?.trim() ?? "";
-  if (!text) return undefined;
+  if (!messageHasPayload(rest)) return undefined;
   return rest as unknown as AgentInputItem;
 }
 
-/** Drop empty messages and fold adjacent same-role messages into one. */
+/** Drop messages with no payload and fold adjacent same-role messages. */
 function tidyClassifierMessages(
   items: readonly AgentInputItem[],
 ): AgentInputItem[] {
@@ -1059,23 +1134,37 @@ function tidyClassifierMessages(
       result.push(item);
       continue;
     }
-    const text = sessionOutputText(value.content)?.trim() ?? "";
-    if (!text) continue;
+    if (!messageHasPayload(value)) continue;
     const role = typeof value.role === "string" ? value.role : "assistant";
     const previous = result[result.length - 1] as
       | Record<string, unknown>
       | undefined;
     if (previous && previous.role === role) {
-      const previousText = sessionOutputText(previous.content)?.trim() ?? "";
+      const text = sessionOutputText(value.content)?.trim() ?? "";
       result[result.length - 1] = {
         ...previous,
-        content: previousText ? `${previousText}\n${text}` : text,
+        content: text
+          ? appendMessageText(previous, text)
+          : appendContentParts(previous, value),
       } as unknown as AgentInputItem;
       continue;
     }
     result.push(item);
   }
   return result;
+}
+
+function appendContentParts(
+  target: Record<string, unknown>,
+  source: Record<string, unknown>,
+): unknown {
+  const incoming = Array.isArray(source.content) ? source.content : [];
+  if (!incoming.length) return target.content;
+  if (Array.isArray(target.content)) return [...target.content, ...incoming];
+  const text = typeof target.content === "string" ? target.content.trim() : "";
+  if (!text) return incoming;
+  const partType = target.role === "user" ? "input_text" : "output_text";
+  return [{ type: partType, text }, ...incoming];
 }
 
 function classifierToolRecord(events: readonly ClassifierToolEvent[]): string {

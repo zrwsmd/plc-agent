@@ -98,6 +98,106 @@ assert.equal(
 assert.equal(assistantWithCalls[1].content.includes('我先读一下。'), true);
 assert.equal(assistantWithCalls[1].content.includes('read_file(a.txt) 失败'), true);
 
+// 协议里的托管工具事件（web_search / program）也必须被压平，不能原样进历史
+const hostedEvents = projectHistoryForClassifier([
+  { type: 'message', role: 'user', content: '查一下资料' },
+  { type: 'web_search_call', status: 'completed' },
+  { type: 'web_search_output', output: '{}' },
+  { type: 'program', code: 'print(1)' },
+  { type: 'program_output', output: '1' },
+  { type: 'message', role: 'assistant', content: '查到了。' },
+]);
+assert.equal(hostedEvents.length, 2, '托管工具事件不能作为独立消息留下');
+assert.equal(hostedEvents[0].content, '查一下资料');
+assert.equal(hostedEvents[1].content.includes('- web_search'), true);
+assert.equal(hostedEvents[1].content.includes('- program'), true);
+assert.equal(
+  hostedEvents.some((item) => item.type === 'web_search_call' || item.type === 'program'),
+  false,
+  '原始工具事件结构不能出现在分类器输入里',
+);
+
+// 回执 ID 对不上时不能猜，结果保持未知
+const orphanReceipt = projectHistoryForClassifier([
+  { type: 'message', role: 'user', content: '继续' },
+  {
+    type: 'function_call',
+    callId: 'c9',
+    name: 'write_file',
+    arguments: '{"path":"a.md"}',
+  },
+  { type: 'function_call_output', callId: 'other', output: '{"ok":false}' },
+  { type: 'message', role: 'assistant', content: '好了' },
+]);
+const orphanText = orphanReceipt[1].content;
+assert.equal(orphanText.includes('write_file(a.md)'), true);
+assert.equal(orphanText.includes('成功'), false, 'ID 对不上时不能标成功');
+assert.equal(orphanText.includes('失败'), false, 'ID 对不上时不能把失败记到别的调用上');
+
+// 没有 ID 的旧格式，只能按先后顺序配对
+const legacyPairing = projectHistoryForClassifier([
+  { type: 'message', role: 'user', content: '继续' },
+  { type: 'function_call', name: 'write_file', arguments: '{"path":"a.md"}' },
+  { type: 'function_call', name: 'read_file', arguments: '{"path":"b.md"}' },
+  { type: 'function_call_output', output: '{"ok":true}' },
+  { type: 'function_call_output', output: '{"ok":false}' },
+  { type: 'message', role: 'assistant', content: '好了' },
+]);
+const legacyText = legacyPairing[1].content;
+assert.equal(legacyText.includes('write_file(a.md) 成功'), true);
+assert.equal(legacyText.includes('read_file(b.md) 失败'), true);
+
+// 记录条数上限：只留最近 12 条，更早的用一句省略带过
+const manyCalls = [{ type: 'message', role: 'user', content: '批量' }];
+for (let index = 0; index < 15; index += 1) {
+  manyCalls.push({
+    type: 'function_call',
+    callId: `c${index}`,
+    name: 'read_file',
+    arguments: `{"path":"f${index}.md"}`,
+  });
+}
+manyCalls.push({ type: 'message', role: 'assistant', content: '完成' });
+const cappedText = projectHistoryForClassifier(manyCalls)[1].content;
+assert.equal(cappedText.includes('较早的 3 次已省略'), true);
+assert.equal(
+  cappedText.split('\n').filter((line) => line.startsWith('- ')).length,
+  12,
+  '记录条数必须被截断',
+);
+assert.equal(cappedText.includes('f0.md'), false, '最旧的调用应被省略');
+assert.equal(cappedText.includes('f14.md'), true, '最新的调用必须保留');
+
+// 只带图片没有文字的 user 消息不能被当成空消息丢掉
+const imageOnly = projectHistoryForClassifier([
+  {
+    type: 'message',
+    role: 'user',
+    content: [{ type: 'input_image', image_url: 'data:image/png;base64,AAAA' }],
+  },
+  { type: 'message', role: 'assistant', content: '看到图了。' },
+]);
+assert.equal(imageOnly.length, 2, '图片消息不能被丢弃');
+assert.equal(Array.isArray(imageOnly[0].content), true);
+
+// 合并相邻同角色消息时，要保留 part 结构，不能拍平成字符串
+const mergedParts = projectHistoryForClassifier([
+  {
+    type: 'message',
+    role: 'assistant',
+    content: [{ type: 'output_text', text: '第一段', annotations: [] }],
+  },
+  {
+    type: 'message',
+    role: 'assistant',
+    content: [{ type: 'output_text', text: '第二段' }],
+  },
+]);
+assert.equal(mergedParts.length, 1);
+assert.equal(Array.isArray(mergedParts[0].content), true);
+assert.equal(mergedParts[0].content[0].annotations.length, 0, '原有 part 元数据要保留');
+assert.equal(mergedParts[0].content[1].text, '第二段');
+
 // 带 message 字段但不是结构化输出的 JSON 不动
 const otherJson = [{ type: 'message', role: 'assistant', content: '{"foo":1}' }];
 assert.deepEqual(projectHistoryForClassifier(otherJson), otherJson);
