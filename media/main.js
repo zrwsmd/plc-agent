@@ -1850,7 +1850,13 @@ function copyTextToClipboard(text) {
       reject(new Error('复制超时'));
     }, 8000);
     pendingCopyRequests.set(requestId, { resolve, reject, timer });
-    vscode.postMessage({ type: 'copyText', text: value, requestId });
+    try {
+      vscode.postMessage({ type: 'copyText', text: value, requestId });
+    } catch (error) {
+      pendingCopyRequests.delete(requestId);
+      clearTimeout(timer);
+      reject(error instanceof Error ? error : new Error(String(error)));
+    }
   });
 }
 
@@ -1863,7 +1869,7 @@ function resolveCopyRequest(msg) {
   else pending.reject(new Error(typeof msg.error === 'string' ? msg.error : '复制失败'));
 }
 
-document.addEventListener('copy', (event) => {
+function getMessageSelectionText() {
   const selection = window.getSelection();
   if (
     !selection ||
@@ -1871,36 +1877,39 @@ document.addEventListener('copy', (event) => {
     !messagesEl?.contains(selection.anchorNode) ||
     !messagesEl.contains(selection.focusNode)
   ) {
-    return;
+    return '';
   }
   const text = selection.toString();
+  return text;
+}
+
+function requestMessageSelectionCopy(event, text) {
   if (!text) return;
 
-  // Populate the native copy event so paragraph and table selections work even
-  // when the host's Webview context-menu command does not copy its selection.
-  let plainTextWritten = false;
+  // Populate the native event for browser compatibility, but always write via
+  // the extension host too. In a VS Code Webview, setting clipboardData and
+  // preventing the event does not reliably commit data to the OS clipboard.
   try {
-    event.clipboardData?.setData('text/plain', text);
-    plainTextWritten = !!event.clipboardData;
+    event?.clipboardData?.setData('text/plain', text);
   } catch (_error) {
-    // Fall back to the host clipboard bridge below.
+    // The host bridge below remains the authoritative copy path.
   }
-  if (plainTextWritten && event.clipboardData) {
-    try {
-      const wrapper = document.createElement('div');
-      for (let index = 0; index < selection.rangeCount; index += 1) {
-        wrapper.appendChild(selection.getRangeAt(index).cloneContents());
-      }
-      event.clipboardData.setData('text/html', wrapper.innerHTML);
-    } catch (_error) {
-      // Plain text is still available if rich clipboard data is unsupported.
-    }
-    event.preventDefault();
-    return;
-  }
+  event?.preventDefault();
+  void copyTextToClipboard(text).catch((error) => {
+    console.error('[clipboard] 选区复制失败', error);
+  });
+}
 
-  event.preventDefault();
-  void copyTextToClipboard(text).catch(() => {});
+document.addEventListener('copy', (event) => {
+  requestMessageSelectionCopy(event, getMessageSelectionText());
+});
+
+// Some Webview versions handle Ctrl/C before dispatching a usable copy event.
+// Capture it explicitly so keyboard copy and the context-menu copy command use
+// the same host-backed path.
+document.addEventListener('keydown', (event) => {
+  if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'c') return;
+  requestMessageSelectionCopy(event, getMessageSelectionText());
 });
 
 function createCodeAction(label, title, onClick) {
