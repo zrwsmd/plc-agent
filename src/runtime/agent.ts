@@ -1576,6 +1576,7 @@ export async function runAgent(
   const refreshWorkflowCompletion = (): void => {
     if (!workflowRuntime || workflowCompleted) return;
     if (!deliveredWorkflowArtifacts().length) return;
+    if (!runCompletionGate(authoritativeWorkflowMessage() ?? "").passed) return;
     workflowCompleted = true;
     if (!workflowCompletionLogged) {
       workflowCompletionLogged = true;

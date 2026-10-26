@@ -1,17 +1,49 @@
 import {
   normalizeWorkflowContract,
+  type DeliveryContractDecision,
   type DeliveryContract,
 } from "../../deliveryContract";
+
+export const ST_TEST_PLAN_EXTENSION = ".plc-test-plan.json";
 
 export function createStCodeDeliveryContract(options: {
   reason?: string;
   workspacePersistence?: "required" | "not_required" | "optional";
   runtimeEntry?: "required" | "not_required" | "optional";
+  includeTestPlan?: boolean;
 } = {}): DeliveryContract {
   const workspacePersistence = options.workspacePersistence ?? "required";
   const runtimeEntry =
     options.runtimeEntry ??
     (workspacePersistence === "required" ? "required" : "not_required");
+  const includeTestPlan = options.includeTestPlan ?? (
+    workspacePersistence === "required" && runtimeEntry !== "not_required"
+  );
+  const deliverables: DeliveryContractDecision["deliverables"] = [{
+    kind: "code" as const,
+    title: "ST 程序",
+    description: "完整 IEC 61131-3 ST 控制程序源码",
+    required: true,
+    acceptableEvidence: workspacePersistence === "required"
+      ? ["delivery_commit" as const]
+      : ["final_artifact" as const],
+    workspacePersistence,
+    workspaceFileExtension: ".st",
+    requiredVerificationTools: ["validate_st_code"],
+    runtimeEntry,
+  }];
+  if (includeTestPlan) {
+    deliverables.push({
+      kind: "data" as const,
+      title: "PLC 测试计划",
+      description:
+        "依据本轮用户原始需求生成的 SemaPLC 兼容测试计划；当前阶段只写入工作区，不解析或执行",
+      required: true,
+      acceptableEvidence: ["successful_write" as const],
+      workspacePersistence: "required" as const,
+      workspaceFileExtension: ST_TEST_PLAN_EXTENSION,
+    });
+  }
   return normalizeWorkflowContract({
     requiresDeliverable: true,
     reason: options.reason ?? (
@@ -19,19 +51,7 @@ export function createStCodeDeliveryContract(options: {
         ? "用户要求生成 ST 代码，运行时按固定流水线校验并保存到当前工作区"
         : "用户要求生成 ST 代码但不强制保存文件"
     ),
-    deliverables: [{
-      kind: "code",
-      title: "ST 程序",
-      description: "完整 IEC 61131-3 ST 控制程序源码",
-      required: true,
-      acceptableEvidence: workspacePersistence === "required"
-        ? ["delivery_commit"]
-        : ["final_artifact"],
-      workspacePersistence,
-      workspaceFileExtension: ".st",
-      requiredVerificationTools: ["validate_st_code"],
-      runtimeEntry,
-    }],
+    deliverables,
   })!;
 }
 
@@ -75,6 +95,15 @@ export function requiresStRuntimeProgram(contract?: DeliveryContract): boolean {
       deliverable.workspaceFileExtension?.toLowerCase() === ".st" &&
       deliverable.workspacePersistence === "required" &&
       deliverable.runtimeEntry !== "not_required",
+    ) === true;
+}
+
+export function requiresStTestPlan(contract?: DeliveryContract): boolean {
+  return isStWorkspaceDeliveryContract(contract) &&
+    contract?.deliverables.some((deliverable) =>
+      deliverable.required &&
+      deliverable.workspacePersistence === "required" &&
+      deliverable.workspaceFileExtension?.toLowerCase() === ST_TEST_PLAN_EXTENSION,
     ) === true;
 }
 

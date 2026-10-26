@@ -53,6 +53,8 @@ import {
   inferStDeliveryContractFromUserText,
   isStCodeDeliveryContract,
   isStWorkspaceDeliveryContract,
+  requiresStTestPlan,
+  ST_TEST_PLAN_EXTENSION,
 } from "./stDeliveryContract";
 import { ST_TOOL_EVIDENCE_EXTRACTORS } from "./stCompletionEvidence";
 
@@ -302,6 +304,7 @@ export class StWorkspaceDeliveryWorkflow implements WorkflowRuntime {
       ["st.validationRuntime", this.validationService],
     ]);
     this.completionAdapter = {
+      collectIssues: (context) => this.collectIssues(context),
       selectRepairTool: (gate, records, availableToolNames) =>
         this.selectRepairTool(gate, records, availableToolNames),
       collectArtifacts: (records) => this.collectArtifacts(records),
@@ -324,7 +327,7 @@ export class StWorkspaceDeliveryWorkflow implements WorkflowRuntime {
   instructions(): string {
     return (
       "\n本轮 .st 工作区交付由运行时按固定流水线执行：" +
-      "主交付链路是 validate_st_code -> commit_st_delivery -> write_file。" +
+      "主交付链路是 validate_st_code -> commit_st_delivery -> write_file；可运行程序还必须再用 write_file 写入配套的 .plc-test-plan.json。" +
       "编写草稿前最多做少量必要查询；如不确定标准库功能块/函数/类型的接口，可调用 st_library_symbol。" +
       "只有当用户明确要求分析现有工作区关系、或 validate_st_code 诊断指向未知工作区符号时，才调用 st_dependency_map、st_change_impact、st_symbol_references。" +
       "这些查询工具只作为只读辅助证据，不能替代校验或写入阶段。" +
@@ -342,6 +345,11 @@ export class StWorkspaceDeliveryWorkflow implements WorkflowRuntime {
       "选定最终源码后，先调用 commit_st_delivery，提交最终写入路径和该源码的 validatedContentHash。" +
       "commit_st_delivery 返回 deliveryAuthorization 后，才能调用 write_file；写入的 path 和完整 content 必须完全匹配已授权候选。" +
       "写入成功回执中的 deliveryCommit 才是正式交付证据，不需要为了同一份写入再次调用 commit_st_delivery。" +
+      "可运行程序的测试计划必须从本轮用户原始需求生成，严格使用 SemaPLC 结构 {program, options?, cases}；program 填正式 ST 程序的工作区相对 .st 路径，cases 为非空数组，变量名必须对应 ST 声明且不能臆造。" +
+      "case 结构按 type 区分：steady 用 {type,name,set,expect,settleMs?,pulseScans?,when?}；sequence 用 {type,name,steps:[{set?,pulseScans?,settleMs?,waitFor?,expect?}]}；trace 用 {type,name,vars,durationMs,intervalMs?,set?,expectShape}；record 用 {type,name,vars,lastScans?,fromTick?,expectShape}。expect 项为 {var,op,value}，op 仅可用 ==、!=、>、>=、<、<=。options 只用 perCaseBudgetMs、stopAfter、failFast、skipBuild、serial。" +
+      "测试用例要覆盖用户原始需求中的关键行为和边界条件；依据可观察信号选择 steady/sequence，只有时序形状需求才用 trace/record，不要为了数量添加无关或无法执行的用例。" +
+      "测试计划当前只写入工作区，不要把 JSON 传给 validate_st_code，也不要尝试解析或执行计划；后续接入 PLC 测试运行器时再消费该文件。" +
+      "ST 源码写入成功后，必须再调用一次 write_file 写入同目录同基名的 .plc-test-plan.json；两份文件都成功写入后才能结束交付。" +
       "不要并行调用工具，也不要调用当前 workflow 未暴露的工具。"
     );
   }
@@ -370,6 +378,9 @@ export class StWorkspaceDeliveryWorkflow implements WorkflowRuntime {
     if (!hasValidatedStWrite(records, Number.NEGATIVE_INFINITY, this.validationService)) {
       return "write_file";
     }
+    if (requiresStTestPlan(this.contract) && !hasSuccessfulStTestPlanWrite(records)) {
+      return "write_file";
+    }
     return undefined;
   }
 
@@ -377,6 +388,37 @@ export class StWorkspaceDeliveryWorkflow implements WorkflowRuntime {
     return records
       .map((record) => this.collectActionArtifact(record))
       .filter((artifact): artifact is Artifact => artifact !== undefined);
+  }
+
+  private collectIssues(
+    context: CompletionGateWorkflowContext,
+  ): CompletionGateIssue[] {
+    if (!requiresStTestPlan(context.deliveryContract)) return [];
+    const stWrite = latestCommittedStWrite(context.records);
+    const hasAnyPlanWrite = context.records.some((record) =>
+      successfulStTestPlanWrite(record),
+    );
+    if (
+      !stWrite ||
+      !hasAnyPlanWrite ||
+      latestSuccessfulStTestPlanWrite(context.records)
+    ) return [];
+    const expectedPath = expectedStTestPlanPath(stWrite.path);
+    return [{
+      toolName: "delivery_contract",
+      args: JSON.stringify({
+        title: "PLC 测试计划",
+        workspaceFileExtension: ST_TEST_PLAN_EXTENSION,
+        target: expectedPath,
+      }),
+      targetKey: "delivery:plc-test-plan:" + stWrite.path,
+      order: context.records.length + 1,
+      risk: "plan",
+      effect: "none",
+      summary: "当前 ST 交付 " + stWrite.path +
+        " 缺少对应的测试计划 " + expectedPath,
+      requiresRepair: true,
+    }];
   }
 
   private resolveIssue(
@@ -435,6 +477,12 @@ export class StWorkspaceDeliveryWorkflow implements WorkflowRuntime {
     if (!commit || !hasStDeliveryCommit(records, this.validationService)) {
       return undefined;
     }
+    if (requiresStTestPlan(this.contract)) {
+      const plan = latestSuccessfulStTestPlanWrite(records);
+      if (!plan) return undefined;
+      const planHash = plan.contentHash ? `，hash=${plan.contentHash}` : "";
+      return `已完成正式交付：${commit.path}；已确认内容通过 ST 校验并成功写入（commit=${commit.commitId}）。配套 PLC 测试计划已写入：${plan.path}${planHash}。当前阶段仅保存计划，尚未解析或执行。`;
+    }
     return `已完成正式交付：${commit.path}；已确认内容通过 ST 校验并成功写入（commit=${commit.commitId}）。`;
   }
 
@@ -445,6 +493,19 @@ export class StWorkspaceDeliveryWorkflow implements WorkflowRuntime {
   private collectActionArtifact(
     call: WorkflowToolRecord,
   ): Artifact | undefined {
+    const plan = successfulStTestPlanWrite(call);
+    if (plan) {
+      return {
+        kind: "file",
+        name: path.basename(plan.path),
+        uri: plan.path,
+        mimeType: "application/json",
+        metadata: {
+          contentHash: plan.contentHash,
+          plan: "plc-test-plan",
+        },
+      };
+    }
     if (
       (call.name === "commit_st_delivery" || call.name === "write_file") &&
       call.result.ok
@@ -490,6 +551,79 @@ export class StWorkspaceDeliveryWorkflow implements WorkflowRuntime {
     }
     return undefined;
   }
+}
+
+interface SuccessfulStTestPlanWrite {
+  path: string;
+  contentHash?: string;
+}
+
+interface SuccessfulCommittedStWrite {
+  path: string;
+  recordIndex: number;
+}
+
+function latestSuccessfulStTestPlanWrite(
+  records: WorkflowToolRecord[],
+): SuccessfulStTestPlanWrite | undefined {
+  const stWrite = latestCommittedStWrite(records);
+  if (!stWrite) return undefined;
+  const expectedPath = normalizeComparablePath(expectedStTestPlanPath(stWrite.path));
+  for (let index = records.length - 1; index > stWrite.recordIndex; index -= 1) {
+    const plan = successfulStTestPlanWrite(records[index]);
+    if (plan && normalizeComparablePath(plan.path) === expectedPath) return plan;
+  }
+  return undefined;
+}
+
+function successfulStTestPlanWrite(
+  record: WorkflowToolRecord,
+): SuccessfulStTestPlanWrite | undefined {
+  if (record.name !== "write_file" || !record.result.ok) return undefined;
+  const args = parseArgs(record.args);
+  const data = resultData(record.result);
+  const rawPath =
+    typeof args.path === "string"
+      ? args.path
+      : typeof data.file === "string"
+        ? data.file
+        : undefined;
+  if (!rawPath || !rawPath.toLowerCase().endsWith(ST_TEST_PLAN_EXTENSION)) {
+    return undefined;
+  }
+  return {
+    path: rawPath,
+    contentHash: typeof data.contentHash === "string" ? data.contentHash : undefined,
+  };
+}
+
+function latestCommittedStWrite(
+  records: WorkflowToolRecord[],
+): SuccessfulCommittedStWrite | undefined {
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const record = records[index];
+    if (record.name !== "write_file" || !record.result.ok) continue;
+    const data = resultData(record.result);
+    const commit = data.deliveryCommit;
+    if (!commit || typeof commit !== "object" || Array.isArray(commit)) continue;
+    const rawPath = (commit as Record<string, unknown>).path;
+    if (typeof rawPath !== "string" || !rawPath.toLowerCase().endsWith(".st")) continue;
+    return { path: rawPath, recordIndex: index };
+  }
+  return undefined;
+}
+
+function expectedStTestPlanPath(stPath: string): string {
+  const parsed = path.parse(stPath);
+  return path.join(parsed.dir, parsed.name + ST_TEST_PLAN_EXTENSION);
+}
+
+function normalizeComparablePath(value: string): string {
+  return path.normalize(value).replace(/[\\/]+/gu, "/").toLowerCase();
+}
+
+function hasSuccessfulStTestPlanWrite(records: WorkflowToolRecord[]): boolean {
+  return latestSuccessfulStTestPlanWrite(records) !== undefined;
 }
 
 function parseArgs(args: string): Record<string, unknown> {

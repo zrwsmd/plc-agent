@@ -10,6 +10,7 @@ import {
   createStCodeDeliveryContract,
   createStToolProvider,
   createStValidationState,
+  evaluateCompletionGate,
 } from './agent.testbundle.mjs';
 
 async function withSession(run, options = {}) {
@@ -49,7 +50,7 @@ async function withSession(run, options = {}) {
         () => true,
         () => false,
       );
-    await run({ invoke, service, workspaceRoot, fileExists });
+    await run({ invoke, service, workflow, workspaceRoot, fileExists });
   } finally {
     await fs.rm(workspaceRoot, { recursive: true, force: true });
     await fs.rm(exportDir, { recursive: true, force: true });
@@ -178,6 +179,103 @@ await withSession(async ({ invoke, fileExists }) => {
     runtimeEntry: 'not_required',
   }),
   userText: '只生成一个供其他程序复用的功能块库，不需要运行和绑定任务',
+});
+
+await withSession(async ({ invoke, workflow, fileExists }) => {
+  const code = 'PROGRAM PlanDemo\nEND_PROGRAM';
+  const validation = await invoke('validate_st_code', { code });
+  assert.equal(validation.ok, true, '正式 ST 候选应通过校验');
+  const authorization = await invoke('commit_st_delivery', {
+    path: 'PlanDemo.st',
+    contentHash: validation.data.validatedContentHash,
+  });
+  assert.equal(authorization.ok, true, '正式 ST 候选应能授权写入');
+  const stWrite = await invoke('write_file', { path: 'PlanDemo.st', content: code });
+  assert.equal(stWrite.ok, true, '正式 ST 源码应成功写入');
+
+  const records = [
+    { name: 'validate_st_code', args: JSON.stringify({ code }), result: validation },
+    { name: 'commit_st_delivery', args: JSON.stringify({ path: 'PlanDemo.st' }), result: authorization },
+    { name: 'write_file', args: JSON.stringify({ path: 'PlanDemo.st', content: code }), result: stWrite },
+  ];
+  const unrelatedPlan = await invoke('write_file', {
+    path: 'OtherProgram.plc-test-plan.json',
+    content: '{"program":"OtherProgram.st","cases":[]}',
+  });
+  assert.equal(unrelatedPlan.ok, true, '其他程序的测试计划本身可以写入');
+  records.push({
+    name: 'write_file',
+    args: JSON.stringify({
+      path: 'OtherProgram.plc-test-plan.json',
+      content: '{"program":"OtherProgram.st","cases":[]}',
+    }),
+    result: unrelatedPlan,
+  });
+  assert.equal(
+    workflow.completionAdapter.finalMessage(records),
+    undefined,
+    '其他程序的计划不能代替当前 ST 的配套计划',
+  );
+  assert.equal(
+    workflow.completionAdapter.selectRepairTool(
+      { passed: false, reason: '缺少 PLC 测试计划', repairInstruction: '写入计划', issues: [] },
+      records,
+      new Set(['validate_st_code', 'commit_st_delivery', 'write_file']),
+    ),
+    'write_file',
+    'ST 已写入但缺少计划时，应继续开放 write_file',
+  );
+  workflow.completionAdapter.restore(records);
+  const gateInput = {
+    userText: '生成一个可运行的 ST 程序并保存到工作区',
+    finalMessage: '已完成正式交付。',
+    deliveryContract: createStCodeDeliveryContract({ workspacePersistence: 'required' }),
+    workflowAdapter: workflow.completionAdapter,
+    toolEvidence: {
+      write_file: ['successful_write', 'delivery_commit'],
+      commit_st_delivery: ['delivery_commit'],
+    },
+  };
+  assert.equal(
+    evaluateCompletionGate({ ...gateInput, toolResults: records }).passed,
+    false,
+    '缺少当前程序对应计划时完成门控必须阻止收尾',
+  );
+
+  const planPath = 'PlanDemo.plc-test-plan.json';
+  const plan = JSON.stringify({
+    program: 'PlanDemo.st',
+    cases: [{
+      type: 'steady',
+      name: 'idle-state',
+      set: { iStart: false },
+      expect: [{ var: 'qRun', op: '==', value: false }],
+      settleMs: 100,
+    }],
+  }, null, 2);
+  const planWrite = await invoke('write_file', { path: planPath, content: plan });
+  assert.equal(planWrite.ok, true, '配套测试计划应能通过通用 write_file 写入');
+  assert.equal(await fileExists(planPath), true, '计划文件应真实落盘');
+  records.push({
+    name: 'write_file',
+    args: JSON.stringify({ path: planPath, content: plan }),
+    result: planWrite,
+  });
+  workflow.completionAdapter.restore(records);
+  assert.equal(
+    evaluateCompletionGate({
+      ...gateInput,
+      finalMessage: workflow.completionAdapter.finalMessage(records),
+      toolResults: records,
+    }).passed,
+    true,
+    'ST 与测试计划均成功写入后完成门控应通过',
+  );
+  const finalMessage = workflow.completionAdapter.finalMessage(records);
+  assert.match(finalMessage, /PlanDemo\.plc-test-plan\.json/u);
+  assert.match(finalMessage, /尚未解析或执行/u);
+}, {
+  userText: '生成一个可运行的 ST 程序并保存到工作区',
 });
 
 await withSession(async ({ invoke, service, fileExists }) => {

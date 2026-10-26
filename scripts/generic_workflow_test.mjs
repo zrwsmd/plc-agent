@@ -191,6 +191,7 @@ try {
 
   const stDeliveryContract = createStCodeDeliveryContract({
     workspacePersistence: 'required',
+    includeTestPlan: false,
   });
   const genericStRuntime = createWorkflowRuntime(
     'st_workspace_delivery',

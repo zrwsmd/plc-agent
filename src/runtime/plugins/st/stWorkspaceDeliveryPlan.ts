@@ -27,11 +27,11 @@ export const ST_WORKSPACE_DELIVERY_STAGES: WorkflowStage[] = [
   },
   {
     order: 3,
-    id: "persist_final_st",
+    id: "persist_st_and_test_plan",
     toolName: "write_file",
-    title: "写入并完成 ST 交付",
-    description: "把已授权且通过校验的同一份 ST 源码写入工作区",
-    successEvidence: "write_file 返回 stPersistence 和 deliveryCommit",
+    title: "写入 ST 与 PLC 测试计划",
+    description: "将已授权的 ST 源码和基于用户需求生成的配套测试计划写入工作区",
+    successEvidence: "ST 写入返回 stPersistence 和 deliveryCommit，测试计划写入返回 successful_write",
     onFailure: "retry",
   },
 ];

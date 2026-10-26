@@ -202,7 +202,7 @@ assert.equal(
   '包含 PROGRAM 的校验候选应被识别为可运行入口',
 );
 const deliveryWorkflow = new StWorkspaceDeliveryWorkflow(
-  createStCodeDeliveryContract({ workspacePersistence: 'required' }),
+  createStCodeDeliveryContract({ workspacePersistence: 'required', includeTestPlan: false }),
   deliveryService,
 );
 
