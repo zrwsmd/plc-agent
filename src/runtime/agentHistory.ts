@@ -721,9 +721,14 @@ export function createHistoricalToolArgumentGuard(
     if (result.data !== undefined && bindings?.result?.length) {
       collectSelectedReferences(result.data, bindings.result, observed);
     }
-    for (const diagnostic of result.diagnostics ?? []) {
-      if (typeof diagnostic.path === "string") {
-        collectTextReferences(diagnostic.path, observed);
+    const diagnostics: unknown[] = Array.isArray(result.diagnostics)
+      ? result.diagnostics
+      : [];
+    for (const value of diagnostics) {
+      if (!value || typeof value !== "object") continue;
+      const path = (value as { path?: unknown }).path;
+      if (typeof path === "string") {
+        collectTextReferences(path, observed);
       }
     }
     for (const reference of observed.keys()) {
@@ -1140,12 +1145,9 @@ function tidyClassifierMessages(
       | Record<string, unknown>
       | undefined;
     if (previous && previous.role === role) {
-      const text = sessionOutputText(value.content)?.trim() ?? "";
       result[result.length - 1] = {
         ...previous,
-        content: text
-          ? appendMessageText(previous, text)
-          : appendContentParts(previous, value),
+        content: mergeMessageContent(previous, value),
       } as unknown as AgentInputItem;
       continue;
     }
@@ -1154,17 +1156,41 @@ function tidyClassifierMessages(
   return result;
 }
 
-function appendContentParts(
+/**
+ * Merge two adjacent same-role messages without losing parts. Extracting the
+ * text and appending only that would silently drop images, files and any other
+ * non-text part carried by the second message.
+ */
+function mergeMessageContent(
   target: Record<string, unknown>,
   source: Record<string, unknown>,
 ): unknown {
-  const incoming = Array.isArray(source.content) ? source.content : [];
-  if (!incoming.length) return target.content;
-  if (Array.isArray(target.content)) return [...target.content, ...incoming];
-  const text = typeof target.content === "string" ? target.content.trim() : "";
-  if (!text) return incoming;
-  const partType = target.role === "user" ? "input_text" : "output_text";
-  return [{ type: partType, text }, ...incoming];
+  const targetContent = target.content;
+  const sourceContent = source.content;
+  if (typeof targetContent === "string" && typeof sourceContent === "string") {
+    const left = targetContent.trim();
+    const right = sourceContent.trim();
+    if (!left) return right;
+    if (!right) return left;
+    return `${left}\n${right}`;
+  }
+  const incoming = messageContentParts(source);
+  if (!incoming.length) return targetContent;
+  return [...messageContentParts(target), ...incoming];
+}
+
+function messageContentParts(value: Record<string, unknown>): unknown[] {
+  const content = value.content;
+  if (Array.isArray(content)) return content;
+  if (typeof content === "string" && content.trim()) {
+    return [
+      {
+        type: value.role === "user" ? "input_text" : "output_text",
+        text: content.trim(),
+      },
+    ];
+  }
+  return [];
 }
 
 function classifierToolRecord(events: readonly ClassifierToolEvent[]): string {

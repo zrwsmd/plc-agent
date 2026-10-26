@@ -198,6 +198,26 @@ assert.equal(Array.isArray(mergedParts[0].content), true);
 assert.equal(mergedParts[0].content[0].annotations.length, 0, '原有 part 元数据要保留');
 assert.equal(mergedParts[0].content[1].text, '第二段');
 
+// 后一条消息同时含文本和图片时，合并不能只留文本
+const mixedMerge = projectHistoryForClassifier([
+  { type: 'message', role: 'user', content: '第一段' },
+  {
+    type: 'message',
+    role: 'user',
+    content: [
+      { type: 'input_text', text: '第二段' },
+      { type: 'input_image', image_url: 'data:image/png;base64,BBBB' },
+    ],
+  },
+]);
+assert.equal(mixedMerge.length, 1);
+const mixedParts = mixedMerge[0].content;
+assert.equal(Array.isArray(mixedParts), true);
+assert.equal(mixedParts.length, 3);
+assert.equal(mixedParts[0].text, '第一段');
+assert.equal(mixedParts[1].text, '第二段');
+assert.equal(mixedParts[2].type, 'input_image', '图片 part 不能在合并时被丢掉');
+
 // 带 message 字段但不是结构化输出的 JSON 不动
 const otherJson = [{ type: 'message', role: 'assistant', content: '{"foo":1}' }];
 assert.deepEqual(projectHistoryForClassifier(otherJson), otherJson);
