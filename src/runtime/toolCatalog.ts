@@ -2,6 +2,25 @@ import type { DeliveryEvidence } from "./deliveryContract";
 import type { ToolEffect, ToolRisk } from "../protocol/results";
 
 /**
+ * Domain-neutral resource semantics for a tool call.
+ *
+ * These are declarative selectors, not a guardrail whitelist. They tell the
+ * runtime which structured input values name the resource being changed so a
+ * source reference (for example, a template path) is not confused with the
+ * effect target. For effect checks, tools without this metadata keep the
+ * conservative generic value scan; they cannot promote arbitrary current-turn
+ * input or output into a write target.
+ */
+export interface ToolResourceBindings {
+  /** Dot-separated input paths that identify the effect target. */
+  target?: readonly string[];
+  /** Dot-separated input paths that identify read/source resources. */
+  source?: readonly string[];
+  /** Dot-separated result.data paths that identify discovered resources. */
+  result?: readonly string[];
+}
+
+/**
  * Domain-neutral description of what a tool can do.
  *
  * A capability is metadata for discovery and routing. It does not execute a
@@ -23,6 +42,7 @@ export interface ToolCapability {
   effect?: ToolEffect;
   requiresApproval?: boolean;
   evidence?: readonly DeliveryEvidence[];
+  resourceBindings?: ToolResourceBindings;
   /**
    * Ordinary fallback surfaces where the tool may be offered when no
    * registered Workflow owns the request. Omit to use the risk-based default.

@@ -11,6 +11,7 @@ import {
   type ToolCapabilityTextMatch,
   type ToolCapabilityTextQuery,
   type ToolCatalogSelectionOptions,
+  type ToolResourceBindings,
 } from "./toolCatalog";
 import {
   commandToolResult,
@@ -42,6 +43,7 @@ export type {
   ToolCatalogSelectionOptions,
   ToolCapabilityQuery,
   ToolCapabilityRegistrationDefaults,
+  ToolResourceBindings,
   ToolFallbackMode,
 } from "./toolCatalog";
 export type {

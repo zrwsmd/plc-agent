@@ -700,7 +700,12 @@ export async function runAgent(
   const isolateHistoricalToolChain =
     !options.initialState && !options.preserveToolHistory;
   const historicalToolArgumentGuard = isolateHistoricalToolChain
-    ? await loadHistoricalToolArgumentGuard(session, userText, toolRisk)
+    ? await loadHistoricalToolArgumentGuard(
+        session,
+        userText,
+        toolRisk,
+        (toolName) => toolCatalog.get(toolName)?.resourceBindings,
+      )
     : undefined;
   const workflowBusinessToolPolicy = workflowRuntime || workflowDescriptor
     ? resolveWorkflowBusinessToolPolicy(
@@ -1280,6 +1285,17 @@ export async function runAgent(
       ) {
         historicalToolArgumentGuard?.allowConfirmedResources(recordedResult.data);
       }
+      let parsedInput: unknown;
+      try {
+        parsedInput = call?.args ? JSON.parse(call.args) : undefined;
+      } catch {
+        parsedInput = undefined;
+      }
+      historicalToolArgumentGuard?.observeCurrentTurnResult(
+        name,
+        parsedInput,
+        recordedResult,
+      );
       recordToolResult(name, callId, recordedResult);
       refreshWorkflowCompletion();
       forceNextWorkflowToolAfterResult(name, recordedResult);

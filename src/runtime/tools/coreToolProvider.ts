@@ -40,6 +40,7 @@ const CORE_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     tags: ["workspace", "read", "files"],
     risk: "read",
     effect: "none",
+    resourceBindings: { result: ["files[]"] },
     fallbackModes: ["read_only", "file_edit"],
   },
   {
@@ -50,6 +51,7 @@ const CORE_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     tags: ["workspace", "read", "files"],
     risk: "read",
     effect: "none",
+    resourceBindings: { source: ["path"], result: ["path"] },
     fallbackModes: ["read_only", "file_edit"],
   },
   {
@@ -71,6 +73,7 @@ const CORE_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     risk: "write",
     effect: "filesystem",
     evidence: ["successful_write"],
+    resourceBindings: { target: ["path"] },
     fallbackModes: ["file_edit"],
   },
   {
@@ -82,6 +85,7 @@ const CORE_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     risk: "write",
     effect: "filesystem",
     evidence: ["successful_write"],
+    resourceBindings: { target: ["path"] },
     fallbackModes: ["file_edit"],
   },
   {
@@ -93,6 +97,7 @@ const CORE_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     risk: "write",
     effect: "filesystem",
     evidence: ["successful_tool"],
+    resourceBindings: { target: ["path"] },
     fallbackModes: ["file_edit"],
   },
   {

@@ -243,6 +243,7 @@ const createProjectCommand = defineDevuniCommand<CreateProjectInput>({
     tags: ["devuni", "project", "write"],
     risk: "write",
     effect: "filesystem",
+    resourceBindings: { target: ["projectName"] },
     fallbackModes: ["file_edit"],
   },
   parameters: createProjectParameters,

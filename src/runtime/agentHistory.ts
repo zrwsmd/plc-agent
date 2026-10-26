@@ -4,7 +4,7 @@ import {
   type ToolResult,
   type ToolRisk,
 } from "../protocol/results";
-import type { ToolCatalog } from "./toolCatalog";
+import type { ToolCatalog, ToolResourceBindings } from "./toolCatalog";
 
 function sessionOutputText(value: unknown): string | undefined {
   if (typeof value === "string") return value;
@@ -273,6 +273,16 @@ export interface HistoricalToolArgumentGuard {
   (toolName: string, input: unknown): string | undefined;
   /** Resources explicitly supplied or selected by the user during this run. */
   allowConfirmedResources(value: unknown): void;
+  /**
+   * Record resources rediscovered by a successful non-effect tool in this run.
+   * This changes provenance, not permission: write/execute calls still pass
+   * through the normal workspace, approval and beforeEffect checks.
+   */
+  observeCurrentTurnResult(
+    toolName: string,
+    input: unknown,
+    result: ToolResult | undefined,
+  ): void;
 }
 
 /** Host-authored context facts may be reused without being treated as stale model output. */
@@ -291,9 +301,11 @@ const NEW_TASK_PIVOT_PATTERN =
 const NEW_TARGET_PATTERN =
   /(?:新建|创建|另建|新生成|create|new\s+(?:a\s+)?(?:file|project|record|task|resource|item|object|report))/iu;
 const MUTATING_ACTION_PATTERN =
-  /(?:创建|新建|写入|保存|修改|编辑|改名|重命名|修复|替换|更新|删除|删掉|清理|移除|运行|执行|测试|构建|编译|导出|部署|提交|create|write|save|modify|edit|rename|fix|replace|update|delete|remove|run|execute|test|build|compile|export|deploy|commit)/iu;
+  /(?:创建|新建|写入|保存|修改|编辑|改名|重命名|修复|修正|纠正|调整|替换|更新|删除|删掉|清理|移除|运行|执行|测试|构建|编译|导出|部署|提交|create|write|save|modify|edit|rename|fix|replace|update|delete|remove|run|execute|test|build|compile|export|deploy|commit)/iu;
 const IMPLICIT_TARGET_PATTERN =
   /(?:文件|程序|代码|结果|记录|项目|配置|报表|任务|对象|资源|file|program|code|result|record|project|config|report|task|object|resource)/iu;
+const BROAD_SCOPE_PATTERN =
+  /(?:所有|全部|整个|全量|当前工作区|工作区内|工作区里的|项目中|工程中|整个项目|all|every|whole|workspace)/iu;
 
 function normalizeResourceReference(value: string): string {
   return value
@@ -419,6 +431,71 @@ function collectComparableValues(
   }
 }
 
+function valuesAtSelector(value: unknown, selector: string): unknown[] {
+  const segments = selector
+    .split(".")
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  if (segments.length === 0) return [];
+  let current: unknown[] = [value];
+  for (const rawSegment of segments) {
+    const expandArray = rawSegment.endsWith("[]");
+    const segment = expandArray ? rawSegment.slice(0, -2) : rawSegment;
+    const next: unknown[] = [];
+    for (const item of current) {
+      if (segment === "*") {
+        if (Array.isArray(item)) next.push(...item);
+        else if (item && typeof item === "object") {
+          next.push(...Object.values(item as Record<string, unknown>));
+        }
+        continue;
+      }
+      if (!item || typeof item !== "object") continue;
+      const selected = (item as Record<string, unknown>)[segment];
+      if (expandArray) {
+        if (Array.isArray(selected)) next.push(...selected);
+      } else if (selected !== undefined) {
+        next.push(selected);
+      }
+    }
+    current = next;
+    if (current.length === 0) break;
+  }
+  return current;
+}
+
+function collectSelectedValues(
+  value: unknown,
+  selectors: readonly string[] | undefined,
+  output: Set<string>,
+): void {
+  if (!selectors || selectors.length === 0) {
+    collectComparableValues(value, output);
+    return;
+  }
+  for (const selector of selectors) {
+    for (const selected of valuesAtSelector(value, selector)) {
+      collectComparableValues(selected, output);
+    }
+  }
+}
+
+function collectSelectedReferences(
+  value: unknown,
+  selectors: readonly string[] | undefined,
+  output: Map<string, string>,
+): void {
+  if (!selectors || selectors.length === 0) {
+    collectStructuredReferences(value, output);
+    return;
+  }
+  for (const selector of selectors) {
+    for (const selected of valuesAtSelector(value, selector)) {
+      collectStructuredReferences(selected, output);
+    }
+  }
+}
+
 function isTrustedContextItem(item: unknown): boolean {
   const value = item as { providerData?: unknown };
   if (!value.providerData || typeof value.providerData !== "object") return false;
@@ -521,6 +598,7 @@ function isContinuationTask(
   return hasRecentTaskContext &&
     MUTATING_ACTION_PATTERN.test(currentUserText) &&
     IMPLICIT_TARGET_PATTERN.test(currentUserText) &&
+    !BROAD_SCOPE_PATTERN.test(currentUserText) &&
     !NEW_TARGET_PATTERN.test(currentUserText);
 }
 
@@ -528,6 +606,8 @@ export function createHistoricalToolArgumentGuard(
   historyItems: readonly AgentInputItem[],
   currentUserText: string,
   getToolRisk: (toolName: string) => ToolRisk = () => "execute",
+  getToolResourceBindings: (toolName: string) => ToolResourceBindings | undefined =
+    () => undefined,
 ): HistoricalToolArgumentGuard | undefined {
   const { references, currentUserIndex } = historicalReferences(historyItems, currentUserText);
   if (references.size === 0) return undefined;
@@ -536,6 +616,14 @@ export function createHistoricalToolArgumentGuard(
   collectTextReferences(currentUserText, explicitlyNamedReferences);
   const continuation = isContinuationTask(historyItems, currentUserIndex, currentUserText);
   const confirmedReferences = new Set<string>();
+  const currentTurnReferences = new Set<string>();
+  const hasIndependentNewTarget =
+    NEW_TARGET_PATTERN.test(currentUserText) &&
+    !DERIVED_TASK_REFERENCE_PATTERN.test(currentUserText);
+  const currentTurnMayEstablishTargets =
+    !continuation &&
+    MUTATING_ACTION_PATTERN.test(currentUserText) &&
+    !hasIndependentNewTarget;
 
   const guard: HistoricalToolArgumentGuard = (toolName, input) => {
     if (continuation) return undefined;
@@ -543,11 +631,13 @@ export function createHistoricalToolArgumentGuard(
     if (risk !== "write" && risk !== "execute") return undefined;
 
     const inputValues = new Set<string>();
-    collectComparableValues(input, inputValues);
+    const bindings = getToolResourceBindings(toolName);
+    collectSelectedValues(input, bindings?.target, inputValues);
     const staleReferences = [...inputValues].filter((value) =>
       references.has(value) &&
       !explicitlyNamedReferences.has(value) &&
-      !confirmedReferences.has(value),
+      !confirmedReferences.has(value) &&
+      !currentTurnReferences.has(value),
     );
     if (staleReferences.length === 0) return undefined;
 
@@ -555,9 +645,9 @@ export function createHistoricalToolArgumentGuard(
       .slice(0, 4)
       .map((reference) => references.get(reference) ?? reference);
     return (
-      "本轮被判定为新任务，工具 " + toolName + " 的参数复用了历史资源（" +
+      "本轮被判定为新任务，工具 " + toolName + " 的目标仍只来自历史任务（" +
       display.join("、") + "）；已阻止工具执行。请按本轮目标重新选择资源参数；" +
-      "若确实要沿用历史资源，请先通过只读核验或本轮澄清明确目标。"
+      "如该目标是本轮检查或分析后确认的，请先让只读/分析工具成功返回目标，再继续执行。"
     );
   };
   guard.allowConfirmedResources = (value) => {
@@ -572,18 +662,51 @@ export function createHistoricalToolArgumentGuard(
       if (references.has(selected)) confirmedReferences.add(selected);
     }
   };
+  guard.observeCurrentTurnResult = (toolName, input, result) => {
+    if (!currentTurnMayEstablishTargets || !result?.ok) return;
+    const risk = getToolRisk(toolName);
+    if (risk !== "read" && risk !== "plan") return;
+
+    const bindings = getToolResourceBindings(toolName);
+    const observed = new Map<string, string>();
+    // Only declared source/target fields can establish provenance from input.
+    // A search query or inline source text may mention an old path without
+    // selecting it as the resource being inspected. Undeclared tools remain
+    // conservative: they may still be guarded, but cannot self-authorize a
+    // later side effect from arbitrary input or result text.
+    if (bindings?.source?.length || bindings?.target?.length) {
+      collectSelectedReferences(
+        input,
+        bindings.source ?? bindings.target,
+        observed,
+      );
+    }
+    if (result.data !== undefined && bindings?.result?.length) {
+      collectSelectedReferences(result.data, bindings.result, observed);
+    }
+    for (const diagnostic of result.diagnostics ?? []) {
+      if (typeof diagnostic.path === "string") {
+        collectTextReferences(diagnostic.path, observed);
+      }
+    }
+    for (const reference of observed.keys()) {
+      if (references.has(reference)) currentTurnReferences.add(reference);
+    }
+  };
   return guard;
 }
 export async function loadHistoricalToolArgumentGuard(
   session: Session,
   currentUserText: string,
   getToolRisk?: (toolName: string) => ToolRisk,
+  getToolResourceBindings?: (toolName: string) => ToolResourceBindings | undefined,
 ): Promise<HistoricalToolArgumentGuard | undefined> {
   try {
     return createHistoricalToolArgumentGuard(
       await session.getItems(),
       currentUserText,
       getToolRisk,
+      getToolResourceBindings,
     );
   } catch {
     return undefined;

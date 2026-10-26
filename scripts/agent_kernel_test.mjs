@@ -1405,6 +1405,15 @@ async function runTestTurn(
     if (['write_file', 'edit_file', 'delete_file', 'devuni_create_project'].includes(toolName)) return 'write';
     return 'execute';
   };
+  const testResourceBindings = (toolName) => {
+    if (['write_file', 'edit_file', 'delete_file'].includes(toolName)) {
+      return { target: ['path'] };
+    }
+    if (toolName === 'read_file') {
+      return { source: ['path'], result: ['path'] };
+    }
+    return undefined;
+  };
   const history = [
     { type: 'message', role: 'user', content: '上一轮读取 yy.txt' },
     {
@@ -1419,6 +1428,7 @@ async function runTestTurn(
     history,
     '分析当前工作区里的 ST 文件依赖',
     testToolRisk,
+    testResourceBindings,
   );
   const staleWrite = newTaskGuard?.('write_file', { path: 'yy.txt', content: 'new' });
   if (!staleWrite?.includes('yy.txt') || !staleWrite.includes('新任务')) {
@@ -1439,6 +1449,7 @@ async function runTestTurn(
     history,
     '继续修改刚才的文件',
     testToolRisk,
+    testResourceBindings,
   );
   if (continuationGuard?.('write_file', { path: 'yy.txt', content: 'new' }) !== undefined) {
     throw new Error('继续任务不应要求历史成功回执才能写入');
@@ -1456,6 +1467,7 @@ async function runTestTurn(
     multipleTargetsHistory,
     '继续处理刚才的文件',
     testToolRisk,
+    testResourceBindings,
   );
   for (const path of ['yy.txt', 'zz.txt']) {
     if (multipleTargetGuard?.('delete_file', { path }) !== undefined) {
@@ -1466,6 +1478,7 @@ async function runTestTurn(
     history,
     '改名并把文件一起重命名',
     testToolRisk,
+    testResourceBindings,
   );
   if (implicitRenameGuard?.('write_file', { path: 'yy.txt', content: 'renamed' }) !== undefined) {
     throw new Error('基于最近活动文件的省略式改名请求没有判为延续任务');
@@ -1479,6 +1492,7 @@ async function runTestTurn(
     history,
     '创建一个全新的 report.json',
     testToolRisk,
+    testResourceBindings,
   );
   if (createNewGuard?.('write_file', { path: 'report.json', content: '{}' }) !== undefined) {
     throw new Error('新建历史中不存在的目标被错误拦截');
@@ -1490,6 +1504,7 @@ async function runTestTurn(
     history,
     '基于刚才的文件创建一个 report.json',
     testToolRisk,
+    testResourceBindings,
   );
   if (derivedArtifactGuard?.('write_file', { path: 'report.json', source: 'yy.txt', content: '{}' }) !== undefined) {
     throw new Error('基于历史对象创建新产物应判为延续任务');
@@ -1500,6 +1515,7 @@ async function runTestTurn(
     history,
     '请更新 yy.txt',
     testToolRisk,
+    testResourceBindings,
   );
   if (explicitTargetGuard?.('write_file', { path: 'yy.txt', content: 'new' }) !== undefined) {
     throw new Error('用户本轮明确指定的历史资源被拦截');
@@ -1517,6 +1533,7 @@ async function runTestTurn(
     recordHistory,
     '更新选中的记录',
     testToolRisk,
+    testResourceBindings,
   );
   if (clarifiedGuard?.('update_record', { recordId: 'case-42', name: 'Renamed' }) !== undefined) {
     throw new Error('尚未确认的历史 ID 不应被静默允许');
@@ -1542,11 +1559,29 @@ async function runTestTurn(
     throw new Error('新任务只读核验历史路径应允许');
   }
 
+  // 搜索词只是查询条件，不是本轮重新确认的资源；没有结果资源元数据
+  // 时，成功搜索也不能给后续写入放行。
+  const searchPromotionGuard = createHistoricalToolArgumentGuard(
+    history,
+    '检查当前工作区的文件，有错误就修正',
+    testToolRisk,
+    testResourceBindings,
+  );
+  searchPromotionGuard?.observeCurrentTurnResult(
+    'search_files',
+    { text: 'yy.txt' },
+    { ok: true, data: { matches: ['yy.txt:1: mention only'] }, diagnostics: [] },
+  );
+  if (searchPromotionGuard?.('write_file', { path: 'yy.txt', content: 'overwrite' }) === undefined) {
+    throw new Error('搜索词提到历史路径时错误地升级了当前写入目标');
+  }
+
   // 稳定 ID 不依赖具体字段名；相同的历史 ID 在新任务副作用参数中会被拦。
   const recordGuard = createHistoricalToolArgumentGuard(
     recordHistory,
     '处理当前仪表盘问题',
     testToolRisk,
+    testResourceBindings,
   );
   if (!recordGuard?.('update_record', { target: 'case-42', label: 'renamed' })?.includes('case-42')) {
     throw new Error('通用参数中的历史 ID 没有被识别');
@@ -1555,6 +1590,7 @@ async function runTestTurn(
     recordHistory,
     'Rename it',
     testToolRisk,
+    testResourceBindings,
   );
   if (recordContinuationGuard?.('update_record', { target: 'case-42', label: 'renamed' }) !== undefined) {
     throw new Error('英文自然指代没有判为延续任务');
@@ -1568,6 +1604,7 @@ async function runTestTurn(
     compressedHistory,
     '继续修改刚才的文件',
     testToolRisk,
+    testResourceBindings,
   );
   if (compressedContinuation?.('write_file', { path: 'yy.txt', content: 'new' }) !== undefined) {
     throw new Error('压缩摘要保留任务关系时没有判为延续');
@@ -1576,6 +1613,7 @@ async function runTestTurn(
     compressedHistory,
     '检查当前工程里的其他文件',
     testToolRisk,
+    testResourceBindings,
   );
   if (compressedNewTask?.('write_file', { path: 'yy.txt', content: 'new' }) === undefined) {
     throw new Error('压缩摘要中的旧资源没有拦截新任务副作用');
@@ -1592,9 +1630,64 @@ async function runTestTurn(
     [trustedSummary],
     '列出当前工程文件',
     testToolRisk,
+    testResourceBindings,
   );
   if (trustedGuard?.('write_file', { path: 'C:/projects/current', content: 'x' }) !== undefined) {
     throw new Error('宿主信任的工程摘要不应作为历史参数拦截');
+  }
+
+  // 新任务先通过本轮读取/分析重新发现历史文件，再执行修改时应放行。
+  const repairGuard = createHistoricalToolArgumentGuard(
+    history,
+    '检查当前工作区的文件，有错误就修正',
+    testToolRisk,
+    testResourceBindings,
+  );
+  if (repairGuard?.('edit_file', { path: 'yy.txt', edits: [] }) === undefined) {
+    throw new Error('尚未经过本轮核验的历史目标不应提前放行');
+  }
+  repairGuard?.observeCurrentTurnResult(
+    'read_file',
+    { path: 'yy.txt' },
+    { ok: true, data: { path: 'yy.txt', content: 'old' }, diagnostics: [] },
+  );
+  if (repairGuard?.('edit_file', { path: 'yy.txt', edits: [] }) !== undefined) {
+    throw new Error('本轮读取后编辑同一目标仍被历史守卫拦截');
+  }
+
+  // 新建独立目标时，读取旧来源不能把旧来源升级为可覆盖目标。
+  const newArtifactAfterReadGuard = createHistoricalToolArgumentGuard(
+    history,
+    '创建一个全新的 report.json',
+    testToolRisk,
+    testResourceBindings,
+  );
+  newArtifactAfterReadGuard?.observeCurrentTurnResult(
+    'read_file',
+    { path: 'yy.txt' },
+    { ok: true, data: { path: 'yy.txt', content: 'old' }, diagnostics: [] },
+  );
+  if (newArtifactAfterReadGuard?.('write_file', { path: 'yy.txt', content: 'overwrite' }) === undefined) {
+    throw new Error('新建独立目标时读取旧来源错误地允许覆盖旧文件');
+  }
+  if (newArtifactAfterReadGuard?.('write_file', { path: 'report.json', content: '{}' }) !== undefined) {
+    throw new Error('新建独立目标被历史资源守卫错误拦截');
+  }
+
+  // 没有修改意图的只读轮次，即使读到了历史目标也不能获得写入资格。
+  const readOnlyGuard = createHistoricalToolArgumentGuard(
+    history,
+    '分析当前工程里的文件依赖',
+    testToolRisk,
+    testResourceBindings,
+  );
+  readOnlyGuard?.observeCurrentTurnResult(
+    'read_file',
+    { path: 'yy.txt' },
+    { ok: true, data: { path: 'yy.txt', content: 'old' }, diagnostics: [] },
+  );
+  if (readOnlyGuard?.('write_file', { path: 'yy.txt', content: 'overwrite' }) === undefined) {
+    throw new Error('只读任务读取历史目标后错误地获得写入资格');
   }
   console.log('[3a2] 任务级历史资源守卫:通过');
 }

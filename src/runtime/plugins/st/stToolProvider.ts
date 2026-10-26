@@ -28,6 +28,10 @@ const ST_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     tags: ["structured_text", "validation", "analysis"],
     risk: "plan",
     effect: "none",
+    resourceBindings: {
+      source: ["path"],
+      result: ["validationTarget.path"],
+    },
     fallbackModes: ["read_only"],
   },
   {
@@ -39,6 +43,10 @@ const ST_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     risk: "plan",
     effect: "none",
     evidence: ["delivery_commit"],
+    resourceBindings: {
+      source: ["path"],
+      result: ["deliveryAuthorization.path", "deliveryCommit.path"],
+    },
     fallbackModes: [],
   },
   {
@@ -60,6 +68,17 @@ const ST_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     tags: ["structured_text", "analysis", "dependencies"],
     risk: "plan",
     effect: "none",
+    resourceBindings: {
+      source: ["path"],
+      result: [
+        "file",
+        "files[]",
+        "dependencies[].file",
+        "dependencies[].dependsOn[]",
+        "cycles[]",
+        "unresolvedSamples[].file",
+      ],
+    },
     fallbackModes: ["read_only"],
   },
   {
@@ -70,6 +89,10 @@ const ST_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     tags: ["structured_text", "analysis", "impact"],
     risk: "plan",
     effect: "none",
+    resourceBindings: {
+      source: ["path"],
+      result: ["target", "directDependents[]", "allDependents[]", "bySymbol.*[]"],
+    },
     fallbackModes: ["read_only"],
   },
   {
@@ -80,6 +103,10 @@ const ST_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     tags: ["structured_text", "analysis", "references"],
     risk: "plan",
     effect: "none",
+    resourceBindings: {
+      source: ["path"],
+      result: ["declarations[].file", "declarations[].references[].file"],
+    },
     fallbackModes: ["read_only"],
   },
   {
@@ -106,6 +133,14 @@ const ST_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     tags: ["structured_text", "plc_runtime", "configuration", "analysis"],
     risk: "read",
     effect: "none",
+    resourceBindings: {
+      result: [
+        "configPath",
+        "stFiles[].source",
+        "stFiles[].resolutions[].matches[].source",
+        "stFiles[].resolutions[].typeMatches[].source",
+      ],
+    },
     fallbackModes: ["read_only"],
   },
 ];
