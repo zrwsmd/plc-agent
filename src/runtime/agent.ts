@@ -137,7 +137,6 @@ import {
   buildHistoricalExplanationContext,
   createNewTurnModelInputSession,
   HISTORICAL_CONTEXT_MARKER_TEXT,
-  loadHistoricalToolArgumentGuard,
   loadHistoricalToolResults,
   NEW_TURN_CONTEXT_PROMPT,
   projectNewTurnSessionHistory,
@@ -189,11 +188,9 @@ export {
 export { verifyWorkspaceWrite } from "./workspaceWriteVerification";
 export {
   composeToolSet,
-  createHistoricalToolArgumentGuard,
   buildHistoricalExplanationContext,
   createNewTurnModelInputSession,
   isToolHistoryItem,
-  loadHistoricalToolArgumentGuard,
   markHistoricalMessageForModelInput,
   projectNewTurnSessionHistory,
   sanitizeAssistantMessageForPersistence,
@@ -713,14 +710,6 @@ export async function runAgent(
   );
   const isolateHistoricalToolChain =
     !options.initialState && !options.preserveToolHistory;
-  const historicalToolArgumentGuard = isolateHistoricalToolChain
-    ? await loadHistoricalToolArgumentGuard(
-        session,
-        userText,
-        toolRisk,
-        (toolName) => toolCatalog.get(toolName)?.resourceBindings,
-      )
-    : undefined;
   const workflowBusinessToolPolicy = workflowRuntime || workflowDescriptor
     ? resolveWorkflowBusinessToolPolicy(
         [workflowRuntime, workflowDescriptor],
@@ -747,16 +736,7 @@ export async function runAgent(
     if (toolCatalog.get(toolName)?.effect === "none") return undefined;
     return `运行时工作流“${workflowRuntime.title}”已经完成，禁止再次调用 ${toolName} 以避免重复副作用；请直接基于已完成的工具回执给出最终总结。`;
   };
-  let historicalArgumentRejectionLogged = false;
   const runtimeToolGuard: RuntimeToolCallGuard = (toolName, input) => {
-    const historicalReason = historicalToolArgumentGuard?.(toolName, input);
-    if (historicalReason) {
-      if (!historicalArgumentRejectionLogged) {
-        historicalArgumentRejectionLogged = true;
-        agentLog(`[context] ${historicalReason}`);
-      }
-      return historicalReason;
-    }
     const workflowReason = completedWorkflowToolRejection(toolName);
     if (workflowReason) return workflowReason;
     const pipelineReason = pipelineStageRuntime.guardToolCall(
@@ -1293,28 +1273,6 @@ export async function runAgent(
       const result = payload.result as ToolResult | undefined;
       const recordedResult =
         result ?? syntheticToolFailureResult(name, call?.args ?? "", payload);
-      if (
-        name === "request_clarification" &&
-        recordedResult &&
-        recordedResult.ok &&
-        recordedResult.data &&
-        typeof recordedResult.data === "object" &&
-        !Array.isArray(recordedResult.data) &&
-        (recordedResult.data as Record<string, unknown>).cancelled !== true
-      ) {
-        historicalToolArgumentGuard?.allowConfirmedResources(recordedResult.data);
-      }
-      let parsedInput: unknown;
-      try {
-        parsedInput = call?.args ? JSON.parse(call.args) : undefined;
-      } catch {
-        parsedInput = undefined;
-      }
-      historicalToolArgumentGuard?.observeCurrentTurnResult(
-        name,
-        parsedInput,
-        recordedResult,
-      );
       recordToolResult(name, callId, recordedResult);
       refreshWorkflowCompletion();
       forceNextWorkflowToolAfterResult(name, recordedResult);

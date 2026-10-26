@@ -5,7 +5,6 @@ import {
   ChatSessionCatalog,
   JsonFileSession,
   ProjectWindowHandoffStore,
-  createHistoricalToolArgumentGuard,
   createProjectHandoffSession,
   extractChatMessages,
 } from './agent.testbundle.mjs';
@@ -77,14 +76,6 @@ assert(messages[0].text.includes('工程语言：st'), 'summary is missing the l
 assert(messages[0].text.includes(`工程目录：${path.resolve(projectRoot)}`), 'summary is missing the project root');
 assert(!messages[0].text.includes('Mixer.code-workspace'), 'workspace descriptor must stay out of the model-visible summary');
 assert(!messages[0].text.includes('旧会话内容'), 'old conversation leaked into the project session');
-const handoffGuard = createHistoricalToolArgumentGuard(
-  items,
-  '列出当前工程中的文件',
-);
-assert(
-  handoffGuard?.('list_files', { dir: projectRoot }) === undefined,
-  'host-authored project summary must not be rejected as a stale historical path',
-);
 assert(
   (await store.claimForWorkspace(workspaceFile, [projectRoot])) === undefined,
   'completed handoff should be consumed exactly once',

@@ -353,6 +353,7 @@ const server = http.createServer((req, res) => {
     const unknownToolRecovery = userText.includes('未知工具恢复回归');
     const historicalArgumentRecovery =
       userText.includes('历史参数恢复回归') || userText.includes('读取历史参数回归');
+    const historicalResourceReuse = userText.includes('内容换成新版');
     const hasToolNotFoundResult = messages.some(
       (message) =>
         message?.role === 'tool' &&
@@ -411,7 +412,14 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
     sse(res, chunk(model, { role: 'assistant' }));
 
-    if (unknownToolRecovery && !hasToolNotFoundResult && !hasAssistantToolCall('ghost_tool')) {
+    if (historicalResourceReuse && last.role !== 'tool') {
+      endWithNamedToolCall(res, model, 'write_file', JSON.stringify({
+        path: 'yy.txt',
+        content: '本轮依据历史上下文更新',
+      }));
+    } else if (historicalResourceReuse && last.role === 'tool') {
+      await streamText(res, model, '已更新 yy.txt。');
+    } else if (unknownToolRecovery && !hasToolNotFoundResult && !hasAssistantToolCall('ghost_tool')) {
       endWithNamedToolCall(res, model, 'ghost_tool', '{}');
     } else if (unknownToolRecovery && hasToolNotFoundResult) {
       await streamText(res, model, '未知工具已被运行时拒绝，已恢复并完成当前请求。');
