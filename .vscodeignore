@@ -20,3 +20,5 @@ media/main.js
 media/main.css
 
 vendor/st-analyzer/vendor.json
+
+.release-hold/
