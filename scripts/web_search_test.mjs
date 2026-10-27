@@ -66,23 +66,28 @@ stubFetch(async (url, init) => {
   return new Response(
     JSON.stringify({
       code: 200,
-      webPages: {
-        value: [
-          {
-            name: 'S7-1200 系统手册',
-            url: 'https://example.com/s71200',
-            siteName: 'example.com',
-            snippet: '短摘要',
-            summary: '  长摘要   带空白  ',
-            datePublished: '2024-05-01',
-          },
-          { name: '没有链接的条目', snippet: '这条要被丢掉' },
-          {
-            name: '',
-            url: 'https://example.com/no-title',
-            summary: '标题为空时用 url 兜底',
-          },
-        ],
+      log_id: 'c1c2c3',
+      // 真实结构:webPages 在 data 下面。按顶层读会永远 0 条,这个用例就是防它。
+      data: {
+        _type: 'SearchResponse',
+        webPages: {
+          value: [
+            {
+              name: 'S7-1200 系统手册',
+              url: 'https://example.com/s71200',
+              siteName: 'example.com',
+              snippet: '短摘要',
+              summary: '  长摘要   带空白  ',
+              datePublished: '2024-05-01',
+            },
+            { name: '没有链接的条目', snippet: '这条要被丢掉' },
+            {
+              name: '',
+              url: 'https://example.com/no-title',
+              summary: '标题为空时用 url 兜底',
+            },
+          ],
+        },
       },
     }),
     { status: 200, headers: { 'Content-Type': 'application/json' } },
@@ -126,6 +131,42 @@ assert(
   `请求体没带上查询词和条数: ${bochaRequest.init.body}`,
 );
 assert(bochaBody.summary === true, '必须要求供应商返回摘要,否则只有一句话片段');
+
+// 老写法:webPages 直接在顶层(没有 data 包一层)。改版前的老接口是这样,也要认。
+stubFetch(async () =>
+  new Response(
+    JSON.stringify({
+      webPages: { value: [{ name: '顶层老结构', url: 'https://example.com/legacy' }] },
+    }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } },
+  ),
+);
+const legacyOutcome = await createBochaProvider({ apiKey: 'k' }).search({ query: 'q', count: 1 });
+restoreFetch();
+assert(
+  legacyOutcome.hits.length === 1 && legacyOutcome.hits[0].title === '顶层老结构',
+  '顶层直接给 webPages 的老结构应当照常解析',
+);
+
+// HTTP 200 但业务 code 非 200:必须抛错。不抛就变成"搜到 0 条",
+// 用户会以为网上没资料,实际是额度/参数/鉴权问题。
+stubFetch(async () =>
+  new Response(
+    JSON.stringify({ code: 403, message: 'You do not have enough money or package quota' }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } },
+  ),
+);
+let businessError;
+try {
+  await createBochaProvider({ apiKey: 'k' }).search({ query: 'q', count: 1 });
+} catch (error) {
+  businessError = String(error?.message ?? error);
+}
+restoreFetch();
+assert(
+  businessError?.includes('403') && businessError?.includes('not have enough money'),
+  `业务错误码应当抛出来并带上原文,不能退化成 0 条: ${businessError}`,
+);
 
 /* ------------------------------------------------------------------ */
 /* [3] 摘要超长要截断,否则单条就能吃掉上下文                          */

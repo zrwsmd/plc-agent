@@ -155,7 +155,20 @@ export function createBochaProvider(options: {
         request.signal,
         options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       );
-      const webPages = asRecord(asRecord(payload)?.webPages);
+      // 博查的搜索结果包在 data 里:{code, log_id, data:{webPages:{value:[...]}}}。
+      // 按顶层读会永远拿到空数组 —— 官方 MCP 源码也是 resp["data"]["webPages"]["value"]。
+      // 顶层直接给 webPages 的老写法也认,少一次改版就全挂。
+      const root = asRecord(payload) ?? {};
+      const code = root.code;
+      if (typeof code === 'number' && code !== 200 && code !== 0) {
+        // HTTP 200 但 code 非 200 表示业务失败(额度、参数、鉴权)。
+        // 不抛的话会退化成"搜到 0 条",把配置问题伪装成"网上没有"。
+        throw new Error(
+          `搜索服务返回 code ${code}: ${textOf(root.message) ?? textOf(root.msg) ?? '未知错误'}`,
+        );
+      }
+      const data = asRecord(root.data) ?? root;
+      const webPages = asRecord(data.webPages);
       const list = Array.isArray(webPages?.value) ? (webPages.value as unknown[]) : [];
       const hits: WebSearchHit[] = [];
       for (const item of list) {
