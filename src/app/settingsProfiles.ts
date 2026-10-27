@@ -8,6 +8,11 @@ import {
 export const API_SETTINGS_STATE_KEY = 'settingsByApiFormat';
 export const LEGACY_SETTINGS_STATE_KEY = 'settings';
 export const LEGACY_API_KEY_SECRET_KEY = 'apiKey';
+/**
+ * 联网搜索的 key。和模型 key 一样只进系统安全存储,不进 settings.json ——
+ * settings.json 是纯文本,而且常常跟着工作区一起被提交。
+ */
+export const WEB_SEARCH_API_KEY_SECRET_KEY = 'webSearchApiKey';
 
 export interface ApiSettingsProfile {
   baseUrl: string;

@@ -18,7 +18,7 @@
     "test:responses": "npm run test:generate && node scripts/responses_test.mjs",
     "test:anthropic": "npm run test:generate && node scripts/anthropic_test.mjs",
     "test:formats": "npm run test:generate && node scripts/format_regression_test.mjs",
-    "test:batch": "npm run test:generate && node scripts/runtime_boundary_test.mjs && node scripts/pipeline_stage_runtime_test.mjs && node scripts/one_shot_tool_choice_test.mjs && node scripts/tool_call_deduper_test.mjs && node scripts/task_plan_test.mjs && node scripts/team_task_test.mjs && node scripts/context_manager_test.mjs && node scripts/context_session_test.mjs && node scripts/completion_gate_test.mjs && node scripts/completion_evidence_test.mjs && node scripts/final_message_guard_test.mjs && node scripts/chat_sessions_test.mjs && node scripts/project_window_handoff_test.mjs && node scripts/classifier_history_test.mjs && node scripts/run_store_test.mjs && node scripts/run_coordinator_test.mjs && node scripts/streaming_test.mjs && node scripts/workspace_tools_test.mjs && node scripts/tool_input_normalizer_test.mjs && node scripts/skill_catalog_test.mjs && node scripts/before_effect_test.mjs && node scripts/sdk_foundation_test.mjs && node scripts/command_risk_test.mjs && node scripts/mcp_client_test.mjs && node scripts/anthropic_test.mjs && node scripts/tool_catalog_test.mjs && node scripts/st_library_test.mjs && node scripts/st_validation_service_test.mjs && node scripts/st_draft_identity_tool_test.mjs && node scripts/devuni_command_test.mjs && node scripts/devuni_workflow_test.mjs",
+    "test:batch": "npm run test:generate && node scripts/runtime_boundary_test.mjs && node scripts/pipeline_stage_runtime_test.mjs && node scripts/one_shot_tool_choice_test.mjs && node scripts/tool_call_deduper_test.mjs && node scripts/task_plan_test.mjs && node scripts/team_task_test.mjs && node scripts/context_manager_test.mjs && node scripts/context_session_test.mjs && node scripts/completion_gate_test.mjs && node scripts/completion_evidence_test.mjs && node scripts/final_message_guard_test.mjs && node scripts/chat_sessions_test.mjs && node scripts/project_window_handoff_test.mjs && node scripts/classifier_history_test.mjs && node scripts/run_store_test.mjs && node scripts/run_coordinator_test.mjs && node scripts/streaming_test.mjs && node scripts/workspace_tools_test.mjs && node scripts/tool_input_normalizer_test.mjs && node scripts/skill_catalog_test.mjs && node scripts/before_effect_test.mjs && node scripts/sdk_foundation_test.mjs && node scripts/command_risk_test.mjs && node scripts/mcp_client_test.mjs && node scripts/anthropic_test.mjs && node scripts/tool_catalog_test.mjs && node scripts/st_library_test.mjs && node scripts/st_validation_service_test.mjs && node scripts/st_draft_identity_tool_test.mjs && node scripts/devuni_command_test.mjs && node scripts/devuni_workflow_test.mjs && node scripts/web_search_test.mjs",
     "test:handoff": "npm run test:generate && node scripts/project_window_handoff_test.mjs",
     "test:agent": "npm run test:generate && node scripts/agent_kernel_test.mjs && node scripts/agent_resume_test.mjs",
     "test:st": "npm run test:generate && node scripts/st_analyzer_test.mjs && node scripts/st_library_test.mjs && node scripts/st_validation_service_test.mjs && node scripts/st_draft_identity_tool_test.mjs",
@@ -26,6 +26,7 @@
     "test:jev": "npm run test:generate && node scripts/jev_decision_test.mjs",
     "test:skills": "npm run test:generate && node scripts/skill_catalog_test.mjs",
     "test:devuni": "npm run test:generate && node scripts/devuni_command_test.mjs && node scripts/devuni_workflow_test.mjs",
+    "test:websearch": "npm run test:generate && node scripts/web_search_test.mjs",
     "test:boundary": "npm run test:generate && node scripts/runtime_boundary_test.mjs",
     "test:workflow": "npm run test:generate && node scripts/runtime_boundary_test.mjs && node scripts/workflow_registry_test.mjs && node scripts/generic_workflow_test.mjs && node scripts/devuni_workflow_test.mjs && node scripts/before_effect_test.mjs && node scripts/tool_catalog_test.mjs",
     "vendor:st-analyzer": "node scripts/vendor_st_analyzer.mjs"
@@ -158,6 +159,32 @@
           "type": "boolean",
           "default": true,
           "description": "启用 Agent Skills；读取工作区 .agents/skills 和用户目录 ~/.agents/skills 中的 SKILL.md"
+        },
+        "plcAgent.webSearch.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "启用联网搜索工具 web_search；未配置 API Key 时该工具不会出现"
+        },
+        "plcAgent.webSearch.provider": {
+          "type": "string",
+          "enum": [
+            "bocha",
+            "tavily"
+          ],
+          "default": "bocha",
+          "description": "联网搜索服务供应商：bocha（博查，国内，有免费额度）或 tavily（海外）"
+        },
+        "plcAgent.webSearch.maxResults": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 8,
+          "default": 5,
+          "description": "web_search 单次最多返回的条数"
+        },
+        "plcAgent.webSearch.endpoint": {
+          "type": "string",
+          "default": "",
+          "description": "自定义搜索接口地址；留空使用所选供应商的默认地址（需要走公司网关或代理时填这里）"
         },
         "plcAgent.context.contextWindowTokens": {
           "type": "number",

@@ -1646,6 +1646,21 @@ body.settings-open { overflow: hidden; }
   margin: 16px 0 8px;
 }
 .settings-page-title + .settings-section-title { margin-top: 0; }
+/* 开关行:input 的通用样式(width:100% + block)会把勾选框撑满整行,这里单独放开 */
+.settings-form .settings-switch-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+.settings-form .settings-switch-row input[type="checkbox"] {
+  display: inline-block;
+  width: auto;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--accent);
+}
+.settings-form .settings-switch-row span { color: var(--fg); }
 .settings-form label {
   display: block;
   font-size: 12px;

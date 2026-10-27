@@ -103,9 +103,15 @@ function listAllTypeScriptFiles(directory) {
 const files = listTypeScriptFiles(runtimeRoot);
 const pluginFiles = listAllTypeScriptFiles(pluginRoot);
 const sourceFiles = listTypeScriptFiles(sourceRoot);
+/**
+ * 有几个插件工具名和 OpenAI 托管工具的事件名撞车(目前只有 web_search:
+ * response.web_search_call.*)。公共运行时里那些出现是协议词汇,不是对插件
+ * 工具的引用,按名字扫会把它们误判成违规。只跳过这几个,其余照旧拦。
+ */
+const hostedToolVocabulary = new Set(['web_search']);
 const forbiddenTokens = [
   ...staticForbiddenTokens,
-  ...(await registeredPluginToolNames()),
+  ...(await registeredPluginToolNames()).filter((name) => !hostedToolVocabulary.has(name)),
 ];
 const nonStPluginForbiddenTokens = [
   'StAnalyzer',

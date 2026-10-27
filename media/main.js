@@ -49,6 +49,11 @@ const mcpEnvEl = document.getElementById('mcp-env');
 const mcpUrlEl = document.getElementById('mcp-url');
 const mcpSaveEl = document.getElementById('mcp-save');
 const mcpCancelEl = document.getElementById('mcp-cancel');
+const setWebSearchEnabledEl = document.getElementById('set-websearch-enabled');
+const setWebSearchProviderEl = document.getElementById('set-websearch-provider');
+const setWebSearchKeyEl = document.getElementById('set-websearch-key');
+const setWebSearchMaxEl = document.getElementById('set-websearch-max');
+const setWebSearchSaveEl = document.getElementById('set-websearch-save');
 
 let hasSavedKey = false;
 let runtimeMode = 'idle';
@@ -2297,7 +2302,7 @@ function showSaveStatus(text, kind) {
 }
 
 function showSettingsPage(page) {
-  const nextPage = page === 'tools' ? page : 'model';
+  const nextPage = page === 'tools' || page === 'websearch' ? page : 'model';
   settingsPage = nextPage;
   for (const item of settingsEl.querySelectorAll('[data-settings-page]')) {
     const match = item.dataset.settingsPage === nextPage;
@@ -2552,6 +2557,28 @@ function renderBuiltinTools(tools) {
     }
   }
 }
+
+function renderWebSearch(settings) {
+  const s = settings && typeof settings === 'object' ? settings : {};
+  setWebSearchEnabledEl.checked = s.enabled !== false;
+  setWebSearchProviderEl.value = s.provider === 'tavily' ? 'tavily' : 'bocha';
+  setWebSearchMaxEl.value = typeof s.maxResults === 'number' ? String(s.maxResults) : '5';
+  setWebSearchKeyEl.value = '';
+  setWebSearchKeyEl.placeholder = s.hasKey ? '已保存,留空则不修改' : '必填';
+}
+
+setWebSearchSaveEl.addEventListener('click', () => {
+  settingsSavePending = true;
+  showSaveStatus('正在保存…');
+  const max = Number(setWebSearchMaxEl.value);
+  vscode.postMessage({
+    type: 'saveWebSearch',
+    enabled: setWebSearchEnabledEl.checked,
+    provider: setWebSearchProviderEl.value,
+    apiKey: setWebSearchKeyEl.value, // 留空 = 不修改已保存的 key
+    maxResults: Number.isFinite(max) ? max : 5,
+  });
+});
 
 function envToText(env) {
   if (!env || typeof env !== 'object') return '';
@@ -4248,6 +4275,7 @@ window.addEventListener('message', (event) => {
       updateModelChip(msg.model, msg.vendorName);
       setShowThinking(msg.showThinking !== false);
       renderBuiltinTools(msg.builtinTools);
+      renderWebSearch(msg.webSearch);
       renderMcpServers(msg.mcpServers, msg.mcpConfigPath, msg.mcpConfigWritable);
       if (msg.mcpError) showSaveStatus(msg.mcpError, 'error');
       break;
@@ -4295,6 +4323,11 @@ window.addEventListener('message', (event) => {
       break;
     case 'mcpStatus':
       applyMcpStatus(msg);
+      break;
+    case 'webSearchSaved':
+      settingsSavePending = false;
+      renderWebSearch(msg.webSearch);
+      showSaveStatus('已保存联网搜索设置', 'ok');
       break;
     case 'pluginCommandResult':
       markToolActionLine(msg.actionKey, msg.ok === true, msg.error);

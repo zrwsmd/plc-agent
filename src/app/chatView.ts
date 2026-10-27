@@ -14,6 +14,10 @@ import { createDevuniCommandPort, type CreatedDevuniProject } from './devuniHost
 import { DEVUNI_COMMAND_PORT_SERVICE } from '../runtime/plugins/devuni/devuniCommandPort';
 import { workspaceRootsFromWorkspaceFile } from '../runtime/plugins/devuni/devuniProjectRoots';
 import { createRuntimeServiceContainer } from '../runtime/services';
+import {
+  WEB_SEARCH_SERVICE,
+  type WebSearchSettings,
+} from '../runtime/plugins/websearch/webSearchProvider';
 import { JsonFileSession } from '../runtime/session';
 import { JsonRunStore, type DurableRunConfig } from '../runtime/runStore';
 import { RunCoordinator, type RuntimeEvent } from '../runtime/runCoordinator';
@@ -57,6 +61,7 @@ import {
   API_SETTINGS_STATE_KEY,
   LEGACY_API_KEY_SECRET_KEY,
   LEGACY_SETTINGS_STATE_KEY,
+  WEB_SEARCH_API_KEY_SECRET_KEY,
   apiKeySecretKey,
   apiKeySecretCandidates,
   createVendorId,
@@ -127,6 +132,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
    * context.subscriptions 上，扩展停用时自动关。
    */
   private readonly mcpPool: McpConnectionPool;
+  /**
+   * 联网搜索的运行时设置（含 key）。
+   *
+   * 存在实例字段上而不是写进 DurableRunConfig：后者会被序列化进 runs.json，
+   * 密钥不该落盘。每次 getConfig() 刷新一次，运行期由 createRuntimeServices
+   * 以服务形式注入，工具层按需读取。
+   */
+  private webSearchSettings: WebSearchSettings = { enabled: false };
   private readonly projectHandoffStore: ProjectWindowHandoffStore;
   private readonly activeProtocolRunIds = new Map<string, string>();
   private readonly pendingProjectWindows = new Map<
@@ -215,6 +228,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         void this.deleteVendor(msg.vendorId);
       } else if (msg.type === 'setPermissionMode') {
         void this.setPermissionMode(msg.permissionMode);
+      } else if (msg.type === 'saveWebSearch') {
+        void this.saveWebSearchSettings(msg);
       } else if (msg.type === 'saveMcpServer') {
         void this.saveMcpServer(msg);
       } else if (msg.type === 'deleteMcpServer') {
@@ -368,6 +383,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         )(config);
         return createRuntimeServiceContainer([
           ...stServices,
+          // 设置里带 key,只在这条通道里过一遍,不进 AgentConfig(那个会落进 runs.json)
+          [WEB_SEARCH_SERVICE, this.webSearchSettings] as const,
           [
             DEVUNI_COMMAND_PORT_SERVICE,
             createDevuniCommandPort({
@@ -702,6 +719,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const configuredApiKey = provider === 'openai'
       ? cfg.get<string>('apiKey')
       : undefined;
+    // 每次取配置都刷新一遍:用户改完设置不必重启窗口
+    this.webSearchSettings = await this.readWebSearchSettings(cfg);
     return {
       baseUrl,
       apiKey: (
@@ -741,6 +760,87 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     };
   }
 
+  /**
+   * 把「配置项 + 安全存储里的 key」拼成一份搜索设置。
+   *
+   * 为什么 key 不放在配置项里:配置项会落进 settings.json,用户同步设置或提交
+   * dotfiles 时就跟着出去了。开关、供应商、条数这些不含密的东西才放配置项。
+   */
+  private async readWebSearchSettings(
+    cfg: vscode.WorkspaceConfiguration,
+  ): Promise<WebSearchSettings> {
+    const enabled = cfg.get<boolean>('webSearch.enabled') ?? true;
+    const rawProvider = (cfg.get<string>('webSearch.provider') ?? 'bocha').trim().toLowerCase();
+    const rawMax = cfg.get<number>('webSearch.maxResults');
+    const endpoint = (cfg.get<string>('webSearch.endpoint') ?? '').trim();
+    const apiKey = (await this.context.secrets.get(WEB_SEARCH_API_KEY_SECRET_KEY))?.trim();
+    return {
+      enabled,
+      provider: rawProvider || 'bocha',
+      // 条数在这里就夹住:配置文件可以被手改成 999,后面没人再校验
+      ...(typeof rawMax === 'number' && Number.isFinite(rawMax)
+        ? { maxResults: Math.min(Math.max(Math.floor(rawMax), 1), 8) }
+        : {}),
+      ...(endpoint ? { endpoint } : {}),
+      ...(apiKey ? { apiKey } : {}),
+    };
+  }
+
+  /**
+   * 保存联网搜索设置。key 留空表示不改,和模型配置那边保持一致 ——
+   * 用户改个条数不该被迫重输一遍 key。
+   */
+  private async saveWebSearchSettings(msg: {
+    enabled?: unknown;
+    provider?: unknown;
+    apiKey?: unknown;
+    maxResults?: unknown;
+  }): Promise<void> {
+    try {
+      const cfg = vscode.workspace.getConfiguration('plcAgent');
+      const provider = typeof msg.provider === 'string' ? msg.provider.trim().toLowerCase() : '';
+      if (provider && provider !== 'bocha' && provider !== 'tavily') {
+        this.post({ type: 'settingsError', message: `未知的搜索供应商: ${provider}` });
+        return;
+      }
+      const maxRaw = Number(msg.maxResults);
+      const maxResults = Number.isFinite(maxRaw)
+        ? Math.min(Math.max(Math.floor(maxRaw), 1), 8)
+        : 5;
+      await cfg.update('webSearch.enabled', msg.enabled !== false, vscode.ConfigurationTarget.Global);
+      await cfg.update('webSearch.provider', provider || 'bocha', vscode.ConfigurationTarget.Global);
+      await cfg.update('webSearch.maxResults', maxResults, vscode.ConfigurationTarget.Global);
+      const apiKey = typeof msg.apiKey === 'string' ? msg.apiKey.trim() : '';
+      if (apiKey) {
+        await this.context.secrets.store(WEB_SEARCH_API_KEY_SECRET_KEY, apiKey);
+      }
+      this.webSearchSettings = await this.readWebSearchSettings(
+        vscode.workspace.getConfiguration('plcAgent'),
+      );
+      this.post({ type: 'webSearchSaved', webSearch: this.webSearchForSettings() });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.post({ type: 'settingsError', message: `保存联网搜索设置失败: ${message}` });
+    }
+  }
+
+  /** 发给前端的搜索设置:永远不带 key,只带「有没有 key」 */
+  private webSearchForSettings(): {
+    enabled: boolean;
+    provider: string;
+    maxResults: number;
+    hasKey: boolean;
+    endpoint: string;
+  } {
+    return {
+      enabled: this.webSearchSettings.enabled !== false,
+      provider: this.webSearchSettings.provider ?? 'bocha',
+      maxResults: this.webSearchSettings.maxResults ?? 5,
+      hasKey: !!this.webSearchSettings.apiKey,
+      endpoint: this.webSearchSettings.endpoint ?? '',
+    };
+  }
+
   private async sendSettingsToWebview(
     requestedProvider?: AgentProvider,
     requestedApiFormat?: AgentApiFormat,
@@ -767,6 +867,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         permissionMode: cfg.permissionMode ?? 'ask',
         source: cfg.savedInPlugin ? 'plugin' : 'other',
         builtinTools: this.builtinToolsForSettings(),
+        webSearch: this.webSearchForSettings(),
         ...(await this.mcpSettingsPayload()),
         ...(requestId === undefined ? {} : { requestId }),
       });
@@ -1293,6 +1394,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           <button type="button" class="settings-nav-item active" data-settings-page="model">模型配置</button>
           <div class="settings-nav-group">扩展</div>
           <button type="button" class="settings-nav-item" data-settings-page="tools">Tools &amp; MCP</button>
+          <button type="button" class="settings-nav-item" data-settings-page="websearch">联网搜索</button>
         </nav>
         <div class="settings-content">
           <section id="settings-page-model" class="settings-page" data-settings-page="model">
@@ -1360,6 +1462,25 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 <button id="mcp-save" class="btn primary" type="button">保存</button>
               </div>
             </div>
+          </section>
+          <section id="settings-page-websearch" class="settings-page hidden" data-settings-page="websearch">
+            <div class="settings-page-title">联网搜索</div>
+            <div class="settings-form">
+              <label class="settings-switch-row">
+                <input id="set-websearch-enabled" type="checkbox" />
+                <span>允许模型联网搜索</span>
+              </label>
+              <label>供应商<select id="set-websearch-provider">
+                <option value="bocha">博查 Bocha(国内,有免费额度)</option>
+                <option value="tavily">Tavily(海外)</option>
+              </select></label>
+              <label>API Key<input id="set-websearch-key" type="password" placeholder="未设置" spellcheck="false" /></label>
+              <label>最多返回条数<input id="set-websearch-max" type="number" min="1" max="8" step="1" placeholder="5" /></label>
+            </div>
+            <div class="settings-actions">
+              <button id="set-websearch-save" class="btn primary" type="button">保存</button>
+            </div>
+            <div class="settings-tip">开启并填好 Key 后,模型才会拿到 web_search 工具。查询词会发到所选供应商,所以每次调用都会单独请求确认。Key 存在系统安全存储里,不进 settings.json。</div>
           </section>
         </div>
       </div>
