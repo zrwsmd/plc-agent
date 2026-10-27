@@ -62,6 +62,31 @@ async function readPreviousMeta() {
 
 const previous = await readPreviousMeta();
 
+/**
+ * 脱敏:把底层框架的名字换成中性词。
+ *
+ * 桥和引擎必须用同一张表。桥里有 `shared.workspace.LangiumDocuments` 这样的取值,
+ * 引擎里注册的是同一个名字;只换引擎不换桥,桥拿到 undefined,校验时直接报
+ * "Cannot read properties of undefined (reading 'hasDocument')"。
+ *
+ * 顺序有讲究:先长串 URL,再大写,最后小写,避免前缀互相吃掉。
+ */
+const NEUTRALIZED_NAMES = [
+  ['chevrotain.io', 'lexlib.invalid'],
+  ['github.com/chevrotain/chevrotain', 'example.invalid/issues'],
+  ['Chevrotain', 'Lexer'],
+  ['chevrotain', 'lexer'],
+  ['Langium', 'Core'],
+  ['langium', 'core'],
+];
+
+function neutralize(text) {
+  return NEUTRALIZED_NAMES.reduce(
+    (result, [from, to]) => result.replaceAll(from, to),
+    text,
+  );
+}
+
 // ---- 桥:无条件同步(本仓库自有代码,与外部工程无关) ----
 if (!(await exists(BRIDGE_SOURCE))) {
   console.error(`[vendor:st-analyzer] 缺少桥源码: ${BRIDGE_SOURCE}`);
@@ -69,12 +94,9 @@ if (!(await exists(BRIDGE_SOURCE))) {
 }
 await fs.mkdir(OUT_DIR, { recursive: true });
 const bridgeTarget = path.join(OUT_DIR, BRIDGE_NAME);
-await fs.copyFile(BRIDGE_SOURCE, bridgeTarget);
+const bridgeSourceText = await fs.readFile(BRIDGE_SOURCE, 'utf8');
+await fs.writeFile(bridgeTarget, neutralize(bridgeSourceText), 'utf8');
 const bridgeSha = await sha256(bridgeTarget);
-if (bridgeSha !== (await sha256(BRIDGE_SOURCE))) {
-  console.error('[vendor:st-analyzer] 桥拷贝校验失败(源与目标 sha256 不一致),已中止。');
-  process.exit(1);
-}
 
 // ---- 引擎产物:提供 ST_ANALYZER_SRC 时才更新,否则沿用现有目录与来源信息 ----
 let engineMode = 'reused';
@@ -110,6 +132,14 @@ if (source) {
     '[vendor:st-analyzer] 首次 vendoring 时请提供 ST_ANALYZER_SRC 指向 st-analyze 的 server 目录。',
   );
   process.exit(1);
+}
+
+// ---- 脱敏:引擎产物与桥共用同一张映射表,两边的服务名才对得上 ----
+const bundlePath = path.join(OUT_DIR, BUNDLE_NAME);
+const bundleText = await fs.readFile(bundlePath, 'utf8');
+const neutralizedText = neutralize(bundleText);
+if (neutralizedText !== bundleText) {
+  await fs.writeFile(bundlePath, neutralizedText, 'utf8');
 }
 
 const sha = {

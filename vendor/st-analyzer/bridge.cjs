@@ -4,7 +4,7 @@
  *
  * 契约:stdin 一行 JSON 进,stdout 一行 JSON 出;退出码 0=成功 / 2=不可用 / 3=协议错 / 4=内部异常。
  * 设计要点:
- *  1. 必须在 require 校验器之前劫持 console,否则 Chevrotain 的语法歧义警告会污染 stdout;
+ *  1. 必须在 require 校验器之前劫持 console,否则 Lexer 的语法歧义警告会污染 stdout;
  *  2. 不依赖 vscode-uri,自己构造 file:// URI(Windows-only);
  *  3. 只把文本折成内存文档,不读盘、不写盘,因此不需要审批;
  *  4. 诊断码映射留给上层(analysis/stDiagnosticCodes),这里只透传原始信息。
@@ -519,7 +519,7 @@ function buildLibraryLookup(request) {
 
   const action = typeof request.action === 'string' && request.action ? request.action : 'validate';
 
-  // 库查询只读 data.json,不碰引擎:在这里提前返回,省掉加载 main.cjs(Langium)的开销。
+  // 库查询只读 data.json,不碰引擎:在这里提前返回,省掉加载 main.cjs(Core)的开销。
   if (action === 'library') {
     let payload = null;
     let exitCode = 0;
@@ -553,7 +553,7 @@ function buildLibraryLookup(request) {
     process.exit(2);
   }
 
-  const docs = shared.workspace.LangiumDocuments;
+  const docs = shared.workspace.CoreDocuments;
   const workspaceRoot = typeof request.workspaceRoot === 'string' ? request.workspaceRoot : '';
   const maxDiagnostics = (request.options && request.options.maxDiagnostics) || 200;
   const normalizeText = (value) => String(value == null ? '' : value).replace(/\r\n/g, '\n');
@@ -563,7 +563,7 @@ function buildLibraryLookup(request) {
     const uri = makeUri(resolveAbsolutePath(workspaceRoot, item.path));
     if (docs.hasDocument(uri)) docs.deleteDocument(uri);
     const text = normalizeText(item.text);
-    const document = shared.workspace.LangiumDocumentFactory.fromString(text, uri);
+    const document = shared.workspace.CoreDocumentFactory.fromString(text, uri);
     docs.addDocument(document);
     // text 仅供符号引用查询换算行列号,其余动作不读它
     created.push({ key: uri.toString(), uri, document, requestPath: item.path, text });

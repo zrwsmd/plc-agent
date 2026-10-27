@@ -3,10 +3,10 @@
   "sourceCommit": "588da9b830c2aa5801dc2e1a4fa437f981995a65",
   "sourceDirty": false,
   "bundleMtime": "2026-09-23T01:22:06.942Z",
-  "vendoredAt": "2026-09-28T02:36:53.289Z",
+  "vendoredAt": "2026-10-27T03:14:28.965Z",
   "sha256": {
-    "main": "a593be161a0dbd2a0683894562ce3fa3088ae5b95122a0a90754d27e609fcb78",
+    "main": "8a0b9ca281cec496f2a5bcb41a3941c5988aee65cc07b335d5776c50ab9654de",
     "data": "b13c3a396c8028ef1f3cd1a431586a2fad1fcc6ed53b131a823dd6e02b73c1c5",
-    "bridge": "29e38002d1708cf65891adaaccd589b7f5b2e6c448817311d6d503b8114ad345"
+    "bridge": "cedaefe55f9d93064c24ab624fd0087c737734e9b16f56e785c4cc9bcd0c2424"
   }
 }
