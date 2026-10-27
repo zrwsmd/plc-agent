@@ -14,3 +14,4 @@ scripts/
 docs/
 .vscode/
 .kilo/
+.tmpbuild/
