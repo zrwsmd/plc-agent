@@ -1,5 +1,6 @@
 node_modules/
 dist/
+media/bundle/
 *.vsix
 .env
 scripts/agent.testbundle.mjs

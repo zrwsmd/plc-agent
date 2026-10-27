@@ -1239,11 +1239,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     // 带上本次激活的时间戳：扩展更新后 webview 仍可能拿缓存里的旧脚本，
     // 表现就是「刚装好能用、过一会儿又变回旧行为」。
     const assetVersion = String(Date.now());
+    // 发布包只带 media/bundle（混淆压缩过），开发宿主直接读 media/ 下的源码：
+    // F5 时改完刷新就能看到效果，不用先跑一遍混淆。
+    const assetDir =
+      this.context.extensionMode === vscode.ExtensionMode.Development
+        ? ['media']
+        : ['media', 'bundle'];
     const js = webview
-      .asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'main.js'))
+      .asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, ...assetDir, 'main.js'))
       .with({ query: `v=${assetVersion}` });
     const css = webview
-      .asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'main.css'))
+      .asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, ...assetDir, 'main.css'))
       .with({ query: `v=${assetVersion}` });
     const nonce = Array.from({ length: 16 }, () => Math.random().toString(36)[2] ?? '0').join('');
 
