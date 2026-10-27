@@ -147,6 +147,16 @@ const PLC_TASK_GROUP_NAMES: Record<PlcTaskGroup, string> = {
   slow_monitor: 'SlowMonitorTask',
 };
 
+/**
+ * 单字段模式(周期已确认、只缺任务名)下任务名输入框的默认值。
+ *
+ * 它只描述"这是一个任务",不描述周期,也不绑定某个程序。任务名是调度容器的名字,
+ * 同一个任务下面可以挂多个周期相同的 PROGRAM;用其中某一个程序名命名,后来挂进来
+ * 的程序就名不副实。角色名(Fast/Main/Slow)对应的是三档周期,周期已经确认时再给
+ * 它们,等于承诺一个并不存在的档位。用户想改成业务名,直接在输入框里改。
+ */
+const DEFAULT_TASK_NAME = 'MainTask';
+
 const plcTaskSuggestionSchema = z.object({
   suggestions: z.array(z.object({
     taskGroup: z.enum(['fast_control', 'main_control', 'slow_monitor']),
@@ -173,7 +183,7 @@ function isWorkspaceRelativeSource(source: string): boolean {
 
 function uniqueName(base: string, existing: Iterable<string>): string {
   const used = new Set([...existing].map((item) => item.toLocaleUpperCase()));
-  const normalized = IEC_IDENTIFIER.test(base) ? base : 'MainTask';
+  const normalized = IEC_IDENTIFIER.test(base) ? base : DEFAULT_TASK_NAME;
   if (!used.has(normalized.toLocaleUpperCase())) return normalized;
   for (let index = 2; index < 10_000; index += 1) {
     const candidate = `${normalized}_${index}`;
@@ -1007,8 +1017,8 @@ function taskNameField(): ClarificationInputField {
     key: 'taskName',
     label: '任务名',
     type: 'iecIdentifier',
-    placeholder: '例如 MainControlTask',
-    hint: '字母或下划线开头，最长 128',
+    placeholder: `例如 ${DEFAULT_TASK_NAME}`,
+    hint: '同一任务下可以挂多个 PROGRAM，名字不跟某个程序绑定；字母或下划线开头，最长 128',
   };
 }
 
@@ -1042,24 +1052,18 @@ function uniquePeriodChoices(
 }
 
 /**
- * 单字段模式下的任务名快捷值。已经存在的任务排在前面——用户很可能就是想绑到那个任务，
- * 而推荐一个同名的新任务只会制造重复。一个已有任务都没有时才用建议里的角色名。
+ * 单字段模式(周期已确认、只缺任务名)下的任务名快捷值。
+ *
+ * 这里只给一个中性默认名,不从已有任务和角色建议里取:
+ * - 已有任务的周期可能和本次确认的周期不一致,推出来点了也提交不了;
+ *   周期一致的已有任务属于"绑定到已有任务",和"新建任务"混在同一列候选里,
+ *   用户会以为自己在起名字,实际是在复用旧任务。
+ * - 角色名对应的是三档周期,周期已经定死时它们没有意义。
+ *
+ * 名字撞车时由 uniqueName 加序号,用户想改成业务名直接在输入框里改。
  */
-function suggestedTaskNames(
-  config: PlcRuntimeConfig,
-  suggestions: readonly NormalizedPlcTaskSuggestion[],
-): string[] {
-  const seen = new Set<string>();
-  const result: string[] = [];
-  const push = (name: string): void => {
-    const key = name.toLocaleUpperCase();
-    if (!name.trim() || seen.has(key) || result.length >= 4) return;
-    seen.add(key);
-    result.push(name);
-  };
-  for (const task of config.tasks) push(task.name);
-  for (const suggestion of suggestions) push(suggestion.taskName);
-  return result;
+function suggestedTaskNames(config: PlcRuntimeConfig): string[] {
+  return [uniqueName(DEFAULT_TASK_NAME, allTaskNames(config))];
 }
 
 export async function preparePlcRuntimeConfigSync(
@@ -1189,7 +1193,7 @@ export async function preparePlcRuntimeConfigSync(
         ]
       : [
           { ...periodField(), readonly: true, value: requested.periodMs! },
-          { ...taskNameField(), choices: suggestedTaskNames(synchronized.config, effectiveSuggestions) },
+          { ...taskNameField(), choices: suggestedTaskNames(synchronized.config) },
         ];
   const question = bothMissing
     ? `PROGRAM ${programName} 还没有明确的 PLC 任务绑定。选一个方案，或者自己填任务名和周期。`

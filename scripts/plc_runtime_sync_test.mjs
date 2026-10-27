@@ -235,11 +235,90 @@ function clarificationWithFields(select) {
     !periodField?.readonly ||
     periodField.value !== 5 ||
     nameField?.readonly ||
-    !nameField?.choices?.includes('MainControlTask') ||
+    nameField?.choices?.length !== 1 ||
+    nameField.choices[0] !== 'MainTask' ||
     taskRequest.options.length !== 0 ||
     taskRequest.question !== '请补充任务名。'
   ) {
     throw new Error('period-only request did not render a single task-name field');
+  }
+}
+
+// Cycle already confirmed: the task-name shortcuts must stay neutral. A task is
+// a scheduling container that can hold several PROGRAMs of the same period, so
+// naming it after one program or one period tier misleads the user; an existing
+// task whose period differs from the confirmed one cannot be submitted at all.
+{
+  const existingTaskWorkspace = await fs.mkdtemp(
+    path.join(os.tmpdir(), 'plc-runtime-sync-existing-task-test-'),
+  );
+  await fs.mkdir(path.join(existingTaskWorkspace, 'src'), { recursive: true });
+  for (const name of ['Existing', 'Other']) {
+    await fs.writeFile(
+      path.join(existingTaskWorkspace, 'src', `${name}.st`),
+      `PROGRAM ${name}\nEND_PROGRAM\n`,
+      'utf8',
+    );
+  }
+  await writePlcRuntimeConfig(
+    path.join(existingTaskWorkspace, PLC_RUNTIME_CONFIG_FILE_NAME),
+    {
+      schemaVersion: 2,
+      tasks: [
+        {
+          name: 'FastControlTask333',
+          deviceId: 'plc',
+          type: 'cyclic',
+          periodMs: 15,
+          priority: 1,
+          cpuCore: 0,
+          instances: [{ name: 'instance_Existing', pou: 'Existing' }],
+        },
+        {
+          name: 'MainTask',
+          deviceId: 'plc',
+          type: 'cyclic',
+          periodMs: 15,
+          priority: 2,
+          cpuCore: 0,
+          instances: [{ name: 'instance_Other', pou: 'Other' }],
+        },
+      ],
+      pous: [
+        { name: 'Existing', pouType: 'program', source: 'src/Existing.st' },
+        { name: 'Other', pouType: 'program', source: 'src/Other.st' },
+      ],
+      devices: [{ id: 'plc', role: 'local', model: 'PLC', points: [], connections: [] }],
+      networks: [],
+      ioMappings: [],
+    },
+  );
+  const fake = clarificationWithFields(() => ({ taskName: 'MainTask_2' }));
+  await preparePlcRuntimeConfigSync({
+    workspaceRoot: existingTaskWorkspace,
+    source: 'StartStop.st',
+    content: 'PROGRAM StartStop\nEND_PROGRAM\n',
+    userRequest: '写一个启保停程序，任务周期是6ms',
+    taskSuggestionProvider: async () => [
+      { taskGroup: 'fast_control', periodMs: 5, reason: '快速控制' },
+      { taskGroup: 'main_control', periodMs: 20, reason: '常规控制' },
+    ],
+    clarification: fake.service,
+  });
+  const nameField = fake.requests[0]?.inputFields?.find(
+    (field) => field.key === 'taskName',
+  );
+  const choices = nameField?.choices ?? [];
+  if (
+    choices.length !== 1 ||
+    choices[0] !== 'MainTask_2' ||
+    choices.includes('FastControlTask333') ||
+    choices.includes('FastControlTask') ||
+    choices.includes('MainControlTask')
+  ) {
+    throw new Error(
+      `task-name shortcuts must stay neutral: ${JSON.stringify(choices)}`,
+    );
   }
 }
 
