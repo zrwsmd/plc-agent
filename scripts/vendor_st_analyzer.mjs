@@ -9,7 +9,8 @@
  *
  * 设计要点:
  *  - 桥(bridge.cjs)是本仓库自己的代码,源在 scripts/st_analyzer_bridge.cjs,
- *    永远无条件同步 —— 改桥不应该依赖任何外部工程;
+ *    永远无条件同步 —— 改桥不应该依赖任何外部工程;同步时会包一层 IIFE 再混淆,
+ *    源码可读,进包的那份不可读;
  *  - 引擎产物(main.cjs / data.json)来自外部构建,只在提供 ST_ANALYZER_SRC 时更新;
  *  - 只同步桥时沿用上一次记录的引擎来源(sourceCommit / sourceDirty / bundleMtime),
  *    不能清空,否则以后判断不出 vendor 里的引擎是哪一版;
@@ -21,6 +22,8 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import JavaScriptObfuscator from 'javascript-obfuscator';
+import { OPTIONS } from './obfuscate_release.mjs';
 
 const OUT_DIR = path.resolve('vendor/st-analyzer');
 const BRIDGE_SOURCE = path.resolve('scripts/st_analyzer_bridge.cjs');
@@ -95,7 +98,22 @@ if (!(await exists(BRIDGE_SOURCE))) {
 await fs.mkdir(OUT_DIR, { recursive: true });
 const bridgeTarget = path.join(OUT_DIR, BRIDGE_NAME);
 const bridgeSourceText = await fs.readFile(BRIDGE_SOURCE, 'utf8');
-await fs.writeFile(bridgeTarget, neutralize(bridgeSourceText), 'utf8');
+
+/**
+ * 桥在 vendor 里是混淆过的:它带着大段中文设计注释,而且 25 个顶层函数名
+ * (buildGraphAnalysis / buildImpactAnalysis / buildLibraryLookup …)本身就把
+ * 能干什么写在了脸上。源码留在 scripts/ 里可读,装进包里的这份不可读。
+ *
+ * 为什么先包一层:renameGlobals:false 对模块顶层的声明不生效,不包的话
+ * 这 25 个名字一个都不会改。包裹是安全的 —— 文件里没有顶层 this、没有顶层
+ * return,末尾那段 async IIFE 照常跑(外层同步返回不影响它继续)。
+ */
+const bridgeWrapped = `(function () {\n${neutralize(bridgeSourceText)}\n})();\n`;
+await fs.writeFile(
+  bridgeTarget,
+  JavaScriptObfuscator.obfuscate(bridgeWrapped, OPTIONS).getObfuscatedCode(),
+  'utf8',
+);
 const bridgeSha = await sha256(bridgeTarget);
 
 // ---- 引擎产物:提供 ST_ANALYZER_SRC 时才更新,否则沿用现有目录与来源信息 ----
