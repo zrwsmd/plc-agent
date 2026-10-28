@@ -1,8 +1,13 @@
 import {
+  MAX_TURNS,
   PipelineStageRuntime,
   ST_WORKSPACE_DELIVERY_PIPELINE_PLAN,
   ST_WORKSPACE_DELIVERY_TURN_BUDGET,
 } from './agent.testbundle.mjs';
+
+if (MAX_TURNS !== 30) {
+  throw new Error(`ordinary model-turn segment should be 30, received ${MAX_TURNS}`);
+}
 
 {
   const runtime = new PipelineStageRuntime({
@@ -146,11 +151,17 @@ import {
 }
 
 {
+  if (
+    ST_WORKSPACE_DELIVERY_TURN_BUDGET.softLimit !== 30 ||
+    ST_WORKSPACE_DELIVERY_TURN_BUDGET.hardLimit !== 30
+  ) {
+    throw new Error('ST delivery turn budget should grant 30 model turns per segment');
+  }
   const baseContext = {
-    currentTurn: 10,
-    currentLimit: 10,
-    softLimit: 10,
-    hardLimit: 20,
+    currentTurn: 30,
+    currentLimit: 30,
+    softLimit: 30,
+    hardLimit: 30,
     completed: false,
     progressToolNames: new Set([
       'validate_st_code',

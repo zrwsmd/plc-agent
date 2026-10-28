@@ -77,8 +77,8 @@ export const ST_WORKSPACE_DELIVERY_TOOL_NAMES = [
 ] as const;
 
 export const ST_WORKSPACE_DELIVERY_TURN_BUDGET: WorkflowTurnBudgetPolicy = {
-  softLimit: 10,
-  hardLimit: 20,
+  softLimit: 30,
+  hardLimit: 30,
   evaluateAtSoftLimit: evaluateStTurnBudget,
 };
 

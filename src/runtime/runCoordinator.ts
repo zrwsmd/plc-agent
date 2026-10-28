@@ -2435,10 +2435,15 @@ export class RunCoordinator {
     } catch (error) {
       const cancelled = controller.signal.aborted || (error instanceof Error && error.name === 'AbortError');
       const manuallyPaused = cancelled && this.pauseRequested;
+      // MaxTurnsExceededError should normally be translated by runAgent into
+      // TurnBudgetExceededError with a serialized SDK checkpoint. Keep this
+      // defensive path resumable too, so an SDK/provider-specific escape does
+      // not turn a budget boundary into a terminal failure.
       const budgetPaused =
-        error instanceof TurnBudgetExceededError && error.canContinue;
+        (error instanceof TurnBudgetExceededError && error.canContinue) ||
+        error instanceof MaxTurnsExceededError;
       const retryableFailure = !cancelled && isRetryableAgentError(error);
-      const errorState = manuallyPaused || retryableFailure
+      const errorState = manuallyPaused || budgetPaused || retryableFailure
         ? getResumableAgentState(error)
         : undefined;
       const hasSdkState = typeof errorState === 'string' && errorState.length > 0;
@@ -2449,7 +2454,7 @@ export class RunCoordinator {
         await rollbackSessionBoundary();
         if (this.isRunInvalidated(runGeneration)) return;
       }
-      const continuable = manuallyPaused || retryableFailure;
+      const continuable = manuallyPaused || budgetPaused || retryableFailure;
       run.status = continuable ? 'paused' : cancelled ? 'cancelled' : 'failed';
       run.state = hasSdkState ? errorState : undefined;
       run.approvals = [];
@@ -3216,7 +3221,7 @@ export class RunCoordinator {
       return error.message;
     }
     if (error instanceof MaxTurnsExceededError) {
-      return '本轮模型交互达到自动预算，已停止当前执行；可以重试，或从已保存的断点继续。';
+      return '本轮模型交互达到自动预算，已暂停当前执行；可以继续下一段预算，或重试本轮。';
     }
     if (
       error instanceof AgentOutputValidationError ||

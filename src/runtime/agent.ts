@@ -409,8 +409,8 @@ export function renderFallbackModeInstructions(mode: WorkflowFallbackMode): stri
 /** Protocol usage alias shared by runtime and run store. */
 export type TurnUsage = UsageSummary;
 
-/** Ordinary requests use this conservative automatic model-turn segment budget. */
-export const MAX_TURNS = 10;
+/** Model turns granted to each automatic execution segment. */
+export const MAX_TURNS = 30;
 /** Workflow-specific policies may extend the initial segment up to their own hard limit. */
 const MAX_COMPLETION_GATE_RETRIES = 3;
 
@@ -2338,8 +2338,19 @@ export async function runAgent(
   let actionReminderUsed = false;
   let runtimeReminderInput: string | undefined;
   while (true) {
-    if (approvalRounds++ >= MAX_TURNS)
-      throw new MaxTurnsExceededError("审批恢复次数超过上限");
+    if (approvalRounds++ >= MAX_TURNS) {
+      const budgetError = new TurnBudgetExceededError(
+        `本轮已暂停并保存当前进度：审批/恢复循环已达到本段预算（${MAX_TURNS} 次）。` +
+        "输入“继续”将从当前断点获得下一段预算；使用“重试”则从本轮起点重新执行。",
+      );
+      try {
+        attachResumableAgentState(budgetError, state?.toString());
+      } catch {
+        // The coordinator falls back to the last safe boundary when this
+        // provider state cannot be serialized.
+      }
+      throw budgetError;
+    }
     if (state) {
       const pending = state.getInterruptions();
       if (pending.length) {

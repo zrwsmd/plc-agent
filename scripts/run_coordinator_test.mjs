@@ -8,6 +8,7 @@ import {
   createTeamTask,
   normalizeWorkflowContract,
   AgentActionVerificationError,
+  MaxTurnsExceededError,
   TurnBudgetExceededError,
 } from './agent.testbundle.mjs';
 
@@ -489,6 +490,52 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
     seen[1].continueTurnBudget !== true
   ) {
     throw new Error('ordinary budget continuation did not restore the next segment');
+  }
+  await fs.rm(test.dir, { recursive: true, force: true });
+}
+
+// A raw SDK max-turn error may escape before runAgent can attach a checkpoint
+// (for example from an outer approval/re-entry loop). It is still a resumable
+// budget boundary: continue restarts at the saved session boundary with a new
+// segment, while retry remains available as the explicit full-turn restart.
+{
+  let calls = 0;
+  const seen = [];
+  const test = await fixture(async (_cfg, _session, _userText, options) => {
+    seen.push({
+      initialState: options.initialState,
+      preserveToolHistory: options.preserveToolHistory,
+      continueTurnBudget: options.continueTurnBudget,
+    });
+    calls += 1;
+    if (calls === 1) throw new MaxTurnsExceededError('escaped SDK budget');
+    return {
+      status: 'completed',
+      output: '原始预算异常已从安全边界继续完成',
+      usage,
+      result: completedAgentResult('原始预算异常已从安全边界继续完成'),
+    };
+  });
+  await test.coordinator.start('执行可能触发 SDK 上限的任务', config, 'key');
+  const paused = await test.store.getLast();
+  if (
+    paused?.status !== 'paused' ||
+    paused.canContinue !== true ||
+    paused.turnBudgetPaused !== true ||
+    !test.events.some((event) => event.type === 'paused' && event.reason === 'turn_budget')
+  ) {
+    throw new Error('raw max-turn error was not preserved as a resumable budget pause');
+  }
+  await test.coordinator.continue('key', '继续');
+  const completed = await test.store.getLast();
+  if (
+    completed?.status !== 'completed' ||
+    seen.length !== 2 ||
+    seen[1].initialState !== undefined ||
+    seen[1].preserveToolHistory !== true ||
+    seen[1].continueTurnBudget !== true
+  ) {
+    throw new Error('raw max-turn fallback did not continue from the safe session boundary');
   }
   await fs.rm(test.dir, { recursive: true, force: true });
 }
