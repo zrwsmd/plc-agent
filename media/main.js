@@ -2342,6 +2342,7 @@ function send() {
     clearPauseNotice();
     inputEl.value = '';
     autoGrow();
+    showContextCompactionState('上下文压缩中', undefined, 'started');
     setRuntimeMode('running');
     vscode.postMessage({ type: 'compact' });
     return;
@@ -4063,7 +4064,7 @@ window.addEventListener('message', (event) => {
           ? 'failed'
           : 'completed';
       if (state === 'started') {
-        showContextCompactionState('正在压缩上下文…', undefined, state);
+        showContextCompactionState('上下文压缩中', undefined, state);
         setRuntimeMode('running');
         break;
       }
@@ -4075,11 +4076,8 @@ window.addEventListener('message', (event) => {
       } else {
         const result = msg.result && typeof msg.result === 'object' ? msg.result : undefined;
         const compacted = result?.compacted === true;
-        const detail = compacted && Number.isFinite(result.beforeItems) && Number.isFinite(result.afterItems)
-          ? `（条目 ${result.beforeItems} → ${result.afterItems}，字符 ${result.beforeCharacters || 0} → ${result.afterCharacters || 0}）`
-          : '';
         showContextCompactionState(
-          compacted ? `上下文压缩完成${detail}` : '当前上下文无需压缩',
+          compacted ? '上下文压缩完成' : '当前上下文无需压缩',
           undefined,
           state,
         );

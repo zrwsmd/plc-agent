@@ -1298,9 +1298,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async compactContext(): Promise<void> {
-    this.post({ type: 'contextCompaction', state: 'started' });
+    this.log.appendLine('[context] 手动上下文压缩开始');
     try {
       await this.ensureRuntime();
+      // Runtime initialization may replay `history`, which resets transient
+      // webview state. Re-announce the operation after initialization so the
+      // visible in-progress state and input lock cannot be cleared mid-run.
+      this.post({ type: 'contextCompaction', state: 'started' });
       const live = await this.getConfig();
       const workspaceRoots = this.workspaceRoots();
       const paths = this.sessionCatalog.pathsFor(this.activeSessionId);
@@ -1310,10 +1314,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       );
       await this.sessionCatalog.touch(this.activeSessionId);
       await this.postSessions();
+      this.log.appendLine(`[context] 手动上下文压缩${result.compacted ? '完成' : '无需执行'}`);
       this.post({ type: 'contextCompaction', state: 'completed', result });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.log.appendLine(`[context] 手动压缩失败: ${message}`);
+      this.log.appendLine(`[context] 手动上下文压缩失败: ${message}`);
       this.post({ type: 'contextCompaction', state: 'failed', error: message });
     }
   }
