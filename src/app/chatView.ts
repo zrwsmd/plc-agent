@@ -1299,6 +1299,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private async compactContext(): Promise<void> {
     this.log.appendLine('[context] 手动上下文压缩开始');
+    // Announce immediately so a slow runtime initialization cannot hide the
+    // in-progress state from the webview.
+    this.post({ type: 'contextCompaction', state: 'started' });
     try {
       await this.ensureRuntime();
       // Runtime initialization may replay `history`, which resets transient

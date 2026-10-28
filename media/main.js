@@ -63,7 +63,9 @@ let canRetry = false;
 let canContinue = false;
 let pauseNoticeEl = null;
 let preflightNoteEl = null;
+let contextCompactionStartNoteEl = null;
 let contextCompactionNoteEl = null;
+let contextCompactionActive = false;
 let settingsRequestId = 0;
 let settingsSavePending = false;
 let pendingLocalUserText = null;
@@ -571,25 +573,44 @@ function clearPreflightNote() {
 }
 
 function clearContextCompactionNote() {
+  contextCompactionActive = false;
+  if (contextCompactionStartNoteEl?.isConnected) contextCompactionStartNoteEl.remove();
   if (contextCompactionNoteEl?.isConnected) contextCompactionNoteEl.remove();
+  contextCompactionStartNoteEl = null;
   contextCompactionNoteEl = null;
 }
 
 function showContextCompactionState(message, runId, status = 'completed') {
   if (currentRunId && runId && currentRunId !== runId) return;
   if (status === 'started') {
+    contextCompactionActive = true;
+    if (
+      !contextCompactionStartNoteEl ||
+      !contextCompactionStartNoteEl.isConnected ||
+      contextCompactionStartNoteEl.dataset.status !== 'started'
+    ) {
+      contextCompactionStartNoteEl = document.createElement('div');
+      contextCompactionStartNoteEl.className = 'tool-note context-compaction-note';
+      contextCompactionStartNoteEl.dataset.runId = runId || '';
+      contextCompactionStartNoteEl.dataset.status = 'started';
+      contextCompactionStartNoteEl.textContent = '上下文压缩开始';
+      insertBeforeFinalAnswer(contextCompactionStartNoteEl, runId);
+    }
     if (!contextCompactionNoteEl || !contextCompactionNoteEl.isConnected) {
       contextCompactionNoteEl = document.createElement('div');
       contextCompactionNoteEl.className = 'tool-note context-compaction-note';
       contextCompactionNoteEl.dataset.runId = runId || '';
       insertBeforeFinalAnswer(contextCompactionNoteEl, runId);
     }
-    contextCompactionNoteEl.textContent = String(message || '上下文压缩开始');
+    contextCompactionNoteEl.textContent = String(message || '上下文压缩中');
     contextCompactionNoteEl.dataset.status = status;
     contextCompactionNoteEl.classList.add('active');
+    setRuntimeMode('running');
   } else {
+    contextCompactionActive = false;
     if (contextCompactionNoteEl?.isConnected) {
       contextCompactionNoteEl.classList.remove('active');
+      contextCompactionNoteEl.remove();
       contextCompactionNoteEl = null;
     }
     const terminalNote = document.createElement('div');
@@ -598,6 +619,9 @@ function showContextCompactionState(message, runId, status = 'completed') {
     terminalNote.dataset.status = status;
     terminalNote.textContent = String(message || '上下文压缩完成');
     insertBeforeFinalAnswer(terminalNote, runId);
+    if (contextCompactionStartNoteEl?.isConnected) {
+      contextCompactionStartNoteEl.dataset.status = status;
+    }
   }
   scrollBottom();
 }
@@ -2340,7 +2364,7 @@ const SLASH_COMMANDS = Object.freeze([
       inputEl.value = '';
       autoGrow();
       hideSlashCommandMenu();
-      showContextCompactionState('上下文压缩开始', undefined, 'started');
+      showContextCompactionState('上下文压缩中', undefined, 'started');
       setRuntimeMode('running');
       vscode.postMessage({ type: 'compact' });
     },
@@ -4198,7 +4222,6 @@ window.addEventListener('message', (event) => {
           : 'completed';
       if (state === 'started') {
         showContextCompactionState('上下文压缩中', undefined, state);
-        setRuntimeMode('running');
         break;
       }
       clearPendingRunAck();
@@ -4329,10 +4352,11 @@ window.addEventListener('message', (event) => {
       break;
     case 'history': {
       // 面板重开:host 回放持久化历史
+      const preserveCompaction = contextCompactionActive;
       clearPendingRunAck();
       clearPauseNotice();
       clearPreflightNote();
-      clearContextCompactionNote();
+      if (!preserveCompaction) clearContextCompactionNote();
       closeClarificationModal();
       clarificationRequests.clear();
       pendingLocalUserText = null;
@@ -4387,7 +4411,16 @@ window.addEventListener('message', (event) => {
       pendingToolCount = 0;
       hadToolThisTurn = false;
       currentRunId = null;
-      setRuntimeMode('idle');
+      if (preserveCompaction) {
+        // History replay replaces the message DOM. Recreate the live
+        // compaction indicators after replay so initialization cannot hide
+        // the operation that is still running.
+        contextCompactionStartNoteEl = null;
+        contextCompactionNoteEl = null;
+        showContextCompactionState('上下文压缩中', undefined, 'started');
+      } else {
+        setRuntimeMode('idle');
+      }
       if (!messages.length && !events.length) showWelcomeHint();
       break;
     }
