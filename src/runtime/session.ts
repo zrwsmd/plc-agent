@@ -16,6 +16,7 @@ import {
   sanitizeAssistantHistoryItems,
   stripHistoricalContextMarker,
 } from './agentHistory';
+import { isContextStateLedgerItem } from './contextStateLedger';
 
 export class JsonFileSession implements Session {
   private items: AgentInputItem[] = [];
@@ -170,6 +171,7 @@ export function extractChatMessages(items: AgentInputItem[]): { role: 'user' | '
   const out: { role: 'user' | 'agent'; text: string }[] = [];
   for (const item of items) {
     const it = item as { type?: string; role?: string; content?: unknown };
+    if (isContextStateLedgerItem(item)) continue;
     if (it.type !== 'message' || (it.role !== 'user' && it.role !== 'assistant')) continue;
     let text = '';
     if (typeof it.content === 'string') {

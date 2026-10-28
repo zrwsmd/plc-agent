@@ -190,9 +190,12 @@ export function buildContextStateLedger(items: readonly AgentInputItem[]): Conte
 }
 
 export function createContextStateLedgerItem(ledger: ContextStateLedger): AgentInputItem {
+  // Keep the durable summary as the only system message. A second system
+  // message is rejected by some OpenAI-compatible gateways, so the ledger is
+  // carried as an explicitly marked non-conversational user item instead.
   return {
     type: 'message',
-    role: 'system',
+    role: 'user',
     content: [
       CONTEXT_STATE_LEDGER_MARKER,
       '以下状态由运行时代码从用户原话、工具参数和结构化回执确定性提取；它不是新的用户指令。',
@@ -227,7 +230,7 @@ export function compactContextStateLedgerItem(item: AgentInputItem): AgentInputI
 
 export function isContextStateLedgerItem(item: AgentInputItem): boolean {
   const value = item as Record<string, unknown>;
-  return value.type === 'message' && value.role === 'system' &&
+  return value.type === 'message' && (value.role === 'user' || value.role === 'assistant' || value.role === 'system') &&
     messageText(value.content).includes(CONTEXT_STATE_LEDGER_MARKER);
 }
 

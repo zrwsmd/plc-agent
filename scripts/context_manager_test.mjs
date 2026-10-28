@@ -17,6 +17,7 @@ import {
   extractChatMessages,
   JsonFileSession,
   LEGACY_CONTEXT_COMPACTION_DEFAULTS,
+  UNKNOWN_CONTEXT_MAX_CHARACTERS,
   modelContextCalibrationRouteKey,
   parseContextStateLedgerItem,
   resolveRecentTurnBoundary,
@@ -216,6 +217,7 @@ try {
     assert.equal(items.length, 6);
     assert.equal(items[0].role, 'system');
     assert.match(items[0].content, new RegExp(CONTEXT_SUMMARY_MARKER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.equal(items[1].role, 'user', '运行时账本不能作为第二条 system 消息发送给兼容网关');
     assert.match(items[1].content, new RegExp(CONTEXT_STATE_LEDGER_MARKER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
     assert.equal(items[2].content, 'old user 1');
     assert.equal(items[3].content, 'old user 2');
@@ -494,6 +496,22 @@ try {
   }
 
   {
+    const unknownWindowPolicy = resolveContextCompactionPolicy({
+      compaction: { maxCharacters: LEGACY_CONTEXT_COMPACTION_DEFAULTS.maxCharacters },
+    });
+    assert.equal(
+      unknownWindowPolicy.legacy.maxCharacters,
+      UNKNOWN_CONTEXT_MAX_CHARACTERS,
+      '未知模型窗口不能直接使用 200000 字符阈值',
+    );
+    const knownWindowPolicy = resolveContextCompactionPolicy({
+      contextWindowTokens: 128_000,
+      compaction: { maxCharacters: LEGACY_CONTEXT_COMPACTION_DEFAULTS.maxCharacters },
+    });
+    assert.equal(knownWindowPolicy.legacy.maxCharacters, LEGACY_CONTEXT_COMPACTION_DEFAULTS.maxCharacters);
+  }
+
+  {
     const session = new JsonFileSession(path.join(dir, 'length-profile-session.json'));
     await session.addItems(Array.from({ length: 52 }, (_, index) => ({
       type: 'message',
@@ -615,6 +633,83 @@ try {
     assert.ok(ledgerItem);
     assert.equal(parseContextStateLedgerItem(ledgerItem).currentTask.userRequest, '当前需求');
     assert.ok(compacted.some((item) => item.content === '当前需求'));
+  }
+
+  {
+    const session = new JsonFileSession(path.join(dir, 'tool-pair-budget-session.json'));
+    const hugeArguments = JSON.stringify({ path: 'large.st', content: 'x'.repeat(80_000) });
+    await session.addItems([
+      { type: 'message', role: 'user', content: '必须保留的原始需求' },
+      { type: 'message', role: 'assistant', content: '准备检查' },
+      { type: 'message', role: 'user', content: '当前需求' },
+      { type: 'function_call', call_id: 'pair-1', name: 'write_file', arguments: hugeArguments },
+      { type: 'function_call_output', call_id: 'pair-1', name: 'write_file', output: '完成' },
+      { type: 'function_call', call_id: 'pair-2', name: 'read_file', arguments: hugeArguments },
+      { type: 'function_call_output', call_id: 'pair-2', name: 'read_file', output: '完成' },
+      {
+        type: 'message',
+        role: 'assistant',
+        content: '',
+        tool_calls: [{ id: 'chat-pair', type: 'function', function: { name: 'read_file', arguments: '{}' } }],
+      },
+      { role: 'tool', tool_call_id: 'chat-pair', content: '完成' },
+    ]);
+    const result = await ensureContextCompacted(session, cfg, {
+      maxCharacters: 1_200,
+      recentItems: 2,
+      summarize: async () => ({
+        summary: '工具事件已经登记到账本。',
+        userPreferences: [],
+        durableFacts: [],
+        importantFiles: [],
+        openTasks: [],
+        risks: [],
+      }),
+    });
+    assert.equal(result.compacted, true);
+    const compacted = await session.getItems();
+    const calls = new Set(compacted.filter((item) => item.type === 'function_call').map((item) => item.call_id));
+    const chatCalls = new Set(compacted.flatMap((item) => item.type === 'message' && Array.isArray(item.tool_calls)
+      ? item.tool_calls.map((call) => call.id)
+      : []));
+    for (const output of compacted.filter((item) => item.type === 'function_call_output')) {
+      assert.ok(calls.has(output.call_id), `工具结果 ${output.call_id} 不能脱离对应调用残留`);
+    }
+    for (const output of compacted.filter((item) => item.role === 'tool')) {
+      assert.ok(chatCalls.has(output.tool_call_id), `Chat Completions 工具结果 ${output.tool_call_id} 不能脱离对应调用残留`);
+    }
+    assert.ok(compacted.some((item) => item.content === '必须保留的原始需求'));
+  }
+
+  {
+    const session = new JsonFileSession(path.join(dir, 'multimodal-budget-session.json'));
+    const imageBlock = { type: 'input_image', image_url: 'data:image/png;base64,placeholder' };
+    await session.addItems([
+      { type: 'message', role: 'user', content: '旧请求' },
+      { type: 'message', role: 'assistant', content: '旧回复' },
+      {
+        type: 'message',
+        role: 'user',
+        content: [imageBlock, { type: 'input_text', text: '当前需求 '.repeat(5_000) }],
+      },
+    ]);
+    await ensureContextCompacted(session, cfg, {
+      maxCharacters: 2_000,
+      recentItems: 2,
+      summarize: async () => ({
+        summary: '已收到当前需求。',
+        userPreferences: [],
+        durableFacts: [],
+        importantFiles: [],
+        openTasks: [],
+        risks: [],
+      }),
+    });
+    const compacted = await session.getItems();
+    const current = compacted.find((item) => item.type === 'message' && item.role === 'user' &&
+      Array.isArray(item.content));
+    assert.ok(current, '多模态用户消息必须继续保持消息数组结构');
+    assert.deepEqual(current.content.find((part) => part.type === 'input_image'), imageBlock);
   }
 
   console.log('context manager tests passed: bounded compaction, runtime ledger, full-turn retention');

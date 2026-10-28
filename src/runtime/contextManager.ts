@@ -139,6 +139,11 @@ export const LEGACY_CONTEXT_COMPACTION_DEFAULTS: Required<LegacyContextCompactio
   maxSummaryInputCharacters: 60_000,
 };
 
+// A profile with no known model window must not wait until the 200k-character
+// legacy threshold. This is a conservative input budget for unknown/local
+// models; a known context window or explicit token budget still wins.
+export const UNKNOWN_CONTEXT_MAX_CHARACTERS = 80_000;
+
 export async function ensureContextCompacted(
   session: ContextManagedSession,
   config: AgentConfig,
@@ -229,13 +234,7 @@ export async function ensureContextCompacted(
       ...protectedUserItems,
       ...recentContentItems.map(compactToolResultItem),
     ];
-    const compactedItems = enforcePostCompactionBudget(
-      candidateItems,
-      2,
-      protectedUserItems.length,
-      policy,
-      modelContext,
-    );
+    const compactedItems = enforcePostCompactionBudget(candidateItems, policy, modelContext);
     await session.replaceItems(compactedItems);
     const afterCharacters = estimateItemsCharacters(compactedItems);
     const afterTokens = inputBudgetTokens === undefined
@@ -292,7 +291,7 @@ export async function ensureContextCompacted(
       ...priorSummaryItems,
       ...protectedUserItems,
       ...recentContentItems.map(compactToolResultItem),
-    ], 2 + priorSummaryItems.length, protectedUserItems.length, policy, modelContext);
+    ], policy, modelContext);
     try {
       await session.replaceItems(fallbackItems);
       const afterCharacters = estimateItemsCharacters(fallbackItems);
@@ -366,15 +365,20 @@ export function resolveContextCompactionPolicy(
   > = {},
 ): ResolvedContextCompactionPolicy {
   const budget = modelContext?.compaction;
+  const configuredMaxCharacters = positiveIntegerOrDefault(
+    options.maxCharacters ?? budget?.maxCharacters,
+    LEGACY_CONTEXT_COMPACTION_DEFAULTS.maxCharacters,
+  );
+  const hasKnownContextWindow = positiveInteger(modelContext?.contextWindowTokens) !== undefined;
+  const hasExplicitTokenBudget = positiveInteger(budget?.maxInputTokens) !== undefined;
   const legacy = {
     maxItems: positiveIntegerOrDefault(
       options.maxItems ?? budget?.maxItems,
       LEGACY_CONTEXT_COMPACTION_DEFAULTS.maxItems,
     ),
-    maxCharacters: positiveIntegerOrDefault(
-      options.maxCharacters ?? budget?.maxCharacters,
-      LEGACY_CONTEXT_COMPACTION_DEFAULTS.maxCharacters,
-    ),
+    maxCharacters: modelContext !== undefined && !hasKnownContextWindow && !hasExplicitTokenBudget
+      ? Math.min(configuredMaxCharacters, UNKNOWN_CONTEXT_MAX_CHARACTERS)
+      : configuredMaxCharacters,
     recentItems: Math.max(
       2,
       positiveIntegerOrDefault(
@@ -543,7 +547,7 @@ function serializeItemsForSummary(items: AgentInputItem[], maxCharacters: number
 
 function isUserMessageItem(item: AgentInputItem): boolean {
   const value = item as Record<string, unknown>;
-  return value.type === 'message' && value.role === 'user';
+  return value.type === 'message' && value.role === 'user' && !isContextStateLedgerItem(item);
 }
 
 function isToolResultItem(item: AgentInputItem): boolean {
@@ -595,8 +599,6 @@ export function resolveRecentTurnBoundary(
 
 function enforcePostCompactionBudget(
   items: AgentInputItem[],
-  protectedUserStartIndex: number,
-  protectedUserCount: number,
   policy: ResolvedContextCompactionPolicy,
   modelContext?: ModelContextProfile,
 ): AgentInputItem[] {
@@ -609,79 +611,78 @@ function enforcePostCompactionBudget(
   };
   if (!exceeds()) return bounded;
 
-  // The summary and deterministic ledger occupy the first two slots. Remove
-  // duplicate old user originals oldest-first; their requirements remain in
-  // the structured summary, while the current task remains in the ledger.
-  let removableUsers = Math.max(0, protectedUserCount);
-  while (
-    exceeds() &&
-    removableUsers > 0 &&
-    protectedUserStartIndex >= 0 &&
-    protectedUserStartIndex < bounded.length
-  ) {
-    bounded.splice(protectedUserStartIndex, 1);
-    removableUsers -= 1;
-  }
-
-  if (!exceeds()) return bounded;
+  // Keep user requirements intact while reducing the least durable data first.
+  // Tool results are recoverable by rerunning a tool; user messages are not.
   bounded = bounded.map((item, index) => index < 2 ? item : hardClipToolResultItem(item, 1_200));
   if (!exceeds()) return bounded;
 
-  // Preserve the complete recent turn structure, but bound verbose assistant
-  // prose and non-latest user messages before considering the current request.
+  // Bound tool arguments and assistant prose without removing their paired
+  // events or discarding any user request.
+  bounded = bounded.map((item, index) => {
+    if (index < 2 || isUserMessageItem(item) || isToolResultItem(item)) return item;
+    return hardClipItemPayload(item, 2_000);
+  });
+  if (!exceeds()) return bounded;
+
   const latestUserIndex = findLastUserMessageIndex(bounded);
   bounded = bounded.map((item, index) => {
-    if (index < 2 || isToolResultItem(item)) return item;
-    const value = item as Record<string, unknown>;
-    if (value.type !== 'message') return hardClipItemPayload(item, 2_000);
-    if (value.role === 'assistant' || (value.role === 'user' && index !== latestUserIndex)) {
-      return clipMessageItem(item, 4_000);
-    }
-    return item;
+    if (index < 2 || isUserMessageItem(item) || isToolEventItem(item)) return item;
+    return clipMessageItem(item, 4_000);
   });
   if (!exceeds()) return bounded;
 
   // An unusually large current request can exceed the configured window by
   // itself. Retain both ends and its full-text fingerprint in the ledger.
   if (latestUserIndex >= 0) bounded[latestUserIndex] = clipMessageItem(bounded[latestUserIndex], 12_000);
-  bounded = bounded.map((item, index) => index < 2 ? item : hardClipItemPayload(item, 1_000));
+  if (!exceeds()) return bounded;
+
+  // Tool events are represented in the deterministic ledger. Drop the oldest
+  // raw events as call/result groups, so the remaining history is valid for
+  // providers that require every tool result to have a matching call.
+  for (let index = 2; exceeds() && index < bounded.length;) {
+    if (isToolEventItem(bounded[index])) {
+      removeToolEventGroupAt(bounded, index);
+      continue;
+    }
+    index += 1;
+  }
+  if (!exceeds()) return bounded;
+
+  // Remove old assistant prose before removing old user requirements. The
+  // latest user message is always retained until the final unavoidable clip.
+  for (let index = 2; exceeds() && index < bounded.length;) {
+    const currentUserIndex = findLastUserMessageIndex(bounded);
+    const item = bounded[index];
+    if (index !== currentUserIndex && !isUserMessageItem(item)) {
+      bounded.splice(index, 1);
+      continue;
+    }
+    index += 1;
+  }
+  if (!exceeds()) return bounded;
+
+  // Only now remove older user messages. This is the last structural removal
+  // because the summary/ledger cannot be assumed to reproduce every original
+  // constraint verbatim.
+  for (let index = 2; exceeds() && index < bounded.length;) {
+    const currentUserIndex = findLastUserMessageIndex(bounded);
+    if (isUserMessageItem(bounded[index]) && index !== currentUserIndex) {
+      bounded.splice(index, 1);
+      continue;
+    }
+    index += 1;
+  }
   if (!exceeds()) return bounded;
 
   const ledgerIndex = bounded.findIndex(isContextStateLedgerItem);
   if (ledgerIndex >= 0) bounded[ledgerIndex] = compactContextStateLedgerItem(bounded[ledgerIndex]);
   const summaryIndex = bounded.findIndex(isContextSummaryItem);
-  if (summaryIndex >= 0) bounded[summaryIndex] = clipMessageItem(bounded[summaryIndex], 6_000);
-  if (!exceeds()) return bounded;
-
-  // Tool events are now represented in the deterministic ledger. Drop the
-  // oldest raw events until the hard budget is met, preserving conversation
-  // messages and the latest request for as long as possible.
-  for (let index = 2; exceeds() && index < bounded.length;) {
-    if (isToolResultItem(bounded[index]) || isToolCallItem(bounded[index])) {
-      bounded.splice(index, 1);
-      continue;
-    }
-    index += 1;
-  }
-  if (!exceeds()) return bounded;
-
-  // Last-resort budget enforcement keeps the two durable context layers and
-  // the current user request. Older recent prose is already represented by
-  // the summary; remove it oldest-first.
-  let currentUserIndex = findLastUserMessageIndex(bounded);
-  for (let index = 2; exceeds() && index < bounded.length;) {
-    if (index !== currentUserIndex) {
-      bounded.splice(index, 1);
-      if (index < currentUserIndex) currentUserIndex -= 1;
-      continue;
-    }
-    index += 1;
-  }
-  if (!exceeds()) return bounded;
   if (summaryIndex >= 0 && summaryIndex < bounded.length) {
-    bounded[summaryIndex] = clipMessageItem(bounded[summaryIndex], 2_000);
+    bounded[summaryIndex] = clipMessageItem(bounded[summaryIndex], 6_000);
   }
-  currentUserIndex = findLastUserMessageIndex(bounded);
+  if (!exceeds()) return bounded;
+
+  const currentUserIndex = findLastUserMessageIndex(bounded);
   if (currentUserIndex >= 0) bounded[currentUserIndex] = clipMessageItem(bounded[currentUserIndex], 2_000);
   return bounded;
 }
@@ -700,7 +701,80 @@ function isWithinCompactionBudget(
 function isToolCallItem(item: AgentInputItem): boolean {
   const value = item as Record<string, unknown>;
   const type = typeof value.type === 'string' ? value.type : '';
-  return type === 'function_call' || type === 'tool_call' || type.endsWith('_call');
+  return type === 'function_call' || type === 'tool_call' || type.endsWith('_call') ||
+    (type === 'message' && Array.isArray(value.tool_calls));
+}
+
+function isToolEventItem(item: AgentInputItem): boolean {
+  return isToolResultItem(item) || isToolCallItem(item);
+}
+
+function toolEventIds(item: AgentInputItem): string[] {
+  const value = item as Record<string, unknown>;
+  const type = typeof value.type === 'string' ? value.type : '';
+  const ids = new Set<string>();
+  const add = (candidate: unknown) => {
+    if (typeof candidate === 'string' && candidate.trim()) ids.add(candidate.trim());
+  };
+  add(value.callId);
+  add(value.call_id);
+  add(value.tool_call_id);
+  add(value.toolCallId);
+  if (isToolCallItem(item) && type !== 'message') add(value.id);
+  if (type === 'message') {
+    if (Array.isArray(value.tool_calls)) {
+      for (const toolCall of value.tool_calls) {
+        if (!toolCall || typeof toolCall !== 'object') continue;
+        const call = toolCall as Record<string, unknown>;
+        add(call.id);
+        add(call.callId);
+        add(call.call_id);
+      }
+    }
+    if (value.function_call && typeof value.function_call === 'object') {
+      const call = value.function_call as Record<string, unknown>;
+      add(call.id);
+      add(call.callId);
+      add(call.call_id);
+    }
+  }
+  return [...ids];
+}
+
+function findToolEventGroupIndices(items: AgentInputItem[], index: number): number[] {
+  const seed = items[index];
+  const ids = new Set(toolEventIds(seed));
+  const group = new Set<number>([index]);
+  if (ids.size > 0) {
+    for (let candidate = 2; candidate < items.length; candidate += 1) {
+      if (!isToolEventItem(items[candidate])) continue;
+      if (toolEventIds(items[candidate]).some((id) => ids.has(id))) group.add(candidate);
+    }
+  } else if (isToolCallItem(seed)) {
+    for (let candidate = index + 1; candidate < items.length; candidate += 1) {
+      if (isToolResultItem(items[candidate])) {
+        group.add(candidate);
+        break;
+      }
+      if (isUserMessageItem(items[candidate]) ||
+        ((items[candidate] as Record<string, unknown>).type === 'message' && !isToolCallItem(items[candidate]))) break;
+    }
+  } else if (isToolResultItem(seed)) {
+    for (let candidate = index - 1; candidate >= 2; candidate -= 1) {
+      if (isToolCallItem(items[candidate])) {
+        group.add(candidate);
+        break;
+      }
+      if (isUserMessageItem(items[candidate]) ||
+        ((items[candidate] as Record<string, unknown>).type === 'message' && !isToolResultItem(items[candidate]))) break;
+    }
+  }
+  return [...group];
+}
+
+function removeToolEventGroupAt(items: AgentInputItem[], index: number): void {
+  const indices = findToolEventGroupIndices(items, index).sort((left, right) => right - left);
+  for (const removalIndex of indices) items.splice(removalIndex, 1);
 }
 
 function hardClipToolResultItem(item: AgentInputItem, maxCharacters: number): AgentInputItem {
@@ -716,7 +790,7 @@ function hardClipToolResultItem(item: AgentInputItem, maxCharacters: number): Ag
   if (original.length <= maxCharacters) return item;
   return {
     ...value,
-    [field]: `${CONTEXT_TOOL_RESULT_CLIP_MARKER}\n${middleClip(original, maxCharacters)}`,
+    [field]: clipContentValue(value[field], maxCharacters, true),
   } as unknown as AgentInputItem;
 }
 
@@ -734,7 +808,42 @@ function clipMessageItem(item: AgentInputItem, maxCharacters: number): AgentInpu
   const value = item as Record<string, unknown>;
   const text = messageText(value.content);
   if (text.length <= maxCharacters) return item;
-  return { ...value, content: middleClip(text, maxCharacters) } as unknown as AgentInputItem;
+  return { ...value, content: clipContentValue(value.content, maxCharacters, false) } as unknown as AgentInputItem;
+}
+
+function clipContentValue(value: unknown, maxCharacters: number, includeMarker: boolean): unknown {
+  const decorate = (text: string): string => includeMarker
+    ? `${CONTEXT_TOOL_RESULT_CLIP_MARKER}\n${text}`
+    : text;
+  if (typeof value === 'string') {
+    return decorate(middleClip(value, maxCharacters));
+  }
+  if (!Array.isArray(value)) {
+    return decorate(middleClip(messageText(value), maxCharacters));
+  }
+
+  const text = value.map((part) => {
+    if (typeof part === 'string') return part;
+    if (part && typeof part === 'object' && typeof (part as Record<string, unknown>).text === 'string') {
+      return (part as Record<string, unknown>).text as string;
+    }
+    return '';
+  }).join('');
+  const clipped = decorate(middleClip(text, maxCharacters));
+  let assigned = false;
+  return value.map((part) => {
+    if (typeof part === 'string') {
+      if (assigned) return '';
+      assigned = true;
+      return clipped;
+    }
+    if (part && typeof part === 'object' && typeof (part as Record<string, unknown>).text === 'string') {
+      if (assigned) return { ...(part as Record<string, unknown>), text: '' };
+      assigned = true;
+      return { ...(part as Record<string, unknown>), text: clipped };
+    }
+    return part;
+  });
 }
 
 function findLastUserMessageIndex(items: readonly AgentInputItem[]): number {

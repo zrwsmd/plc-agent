@@ -190,7 +190,7 @@
           "type": "number",
           "minimum": 0,
           "default": 0,
-          "description": "模型上下文窗口 token 数；0 表示未知/未配置，此时回退旧版压缩阈值"
+          "description": "模型上下文窗口 token 数；0 表示未知/未配置，此时回退保守的字符压缩阈值"
         },
         "plcAgent.context.reservedOutputTokens": {
           "type": "number",
@@ -226,7 +226,7 @@
           "type": "integer",
           "minimum": 1,
           "default": 200000,
-          "description": "兼容旧配置：仅在未配置有效模型上下文预算时作为字符数兜底；token 预算有效时忽略"
+          "description": "兼容旧配置：已知模型窗口或纯旧调用方可使用该字符阈值；现代但未知模型窗口会自动采用更保守的上限；token 预算有效时忽略"
         },
         "plcAgent.context.compaction.recentItems": {
           "type": "integer",
