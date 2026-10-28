@@ -2241,6 +2241,10 @@ function isRetryRequest(text) {
   return /^(?:重试|重试本轮|重新尝试|再次尝试|retry)[。！!,.，、\s]*$/iu.test(String(text ?? '').trim());
 }
 
+function isCompactRequest(text) {
+  return /^\/compact$/iu.test(String(text ?? '').trim());
+}
+
 // ---------- 发送 ----------
 
 function send() {
@@ -2252,6 +2256,14 @@ function send() {
     inputEl.value = '';
     autoGrow();
     vscode.postMessage({ type: 'retry' });
+    return;
+  }
+  if (isCompactRequest(text)) {
+    clearPauseNotice();
+    inputEl.value = '';
+    autoGrow();
+    setRuntimeMode('running');
+    vscode.postMessage({ type: 'compact' });
     return;
   }
   clearPauseNotice();
@@ -3964,6 +3976,38 @@ window.addEventListener('message', (event) => {
     case 'copyTextResult':
       resolveCopyRequest(msg);
       break;
+    case 'contextCompaction': {
+      const state = msg.state === 'started'
+        ? 'started'
+        : msg.state === 'failed'
+          ? 'failed'
+          : 'completed';
+      if (state === 'started') {
+        showContextCompactionState('正在压缩上下文…', undefined, state);
+        setRuntimeMode('running');
+        break;
+      }
+      clearPendingRunAck();
+      currentRunId = null;
+      if (state === 'failed') {
+        showContextCompactionState(`上下文压缩失败：${msg.error || '未知错误'}`, undefined, state);
+        addNote('error-note', msg.error || '上下文压缩失败');
+      } else {
+        const result = msg.result && typeof msg.result === 'object' ? msg.result : undefined;
+        const compacted = result?.compacted === true;
+        const detail = compacted && Number.isFinite(result.beforeItems) && Number.isFinite(result.afterItems)
+          ? `（条目 ${result.beforeItems} → ${result.afterItems}，字符 ${result.beforeCharacters || 0} → ${result.afterCharacters || 0}）`
+          : '';
+        showContextCompactionState(
+          compacted ? `上下文压缩完成${detail}` : '当前上下文无需压缩',
+          undefined,
+          state,
+        );
+      }
+      setRuntimeMode('idle');
+      inputEl.focus();
+      break;
+    }
     case 'preflight':
       showPreflightStage(msg);
       setRuntimeMode('running');

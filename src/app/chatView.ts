@@ -82,7 +82,7 @@ import {
  * 配置持久化:每个 API format 可保存多个命名供应商(baseUrl/model)，apiKey 存 SecretStorage(OS 级加密)。
  * 会话持久化:每个工作区维护多会话索引,每个会话独立保存 SDK Session 与运行状态。
  * 消息协议:
- *   webview → host: {type:'send', text} / {type:'clear'} / {type:'newSession'} / {type:'switchSession', sessionId}
+ *   webview → host: {type:'send', text} / {type:'compact'} / {type:'clear'} / {type:'newSession'} / {type:'switchSession', sessionId}
  *                   {type:'renameSession', sessionId, title} / {type:'deleteSession', sessionId}
  *                   {type:'stop'} / {type:'retry'}
  *                   {type:'continue'}
@@ -103,6 +103,7 @@ import {
  *                   {type:'agentEvent', event: AgentProtocolEvent} (stable SDK-independent stream)
  *                   {type:'approval', name, args}(审批卡片) / {type:'history', messages}
  *                   {type:'settings', baseUrl, model, apiFormat, vendorId, vendors, hasKey, requestId?}
+ *                   {type:'contextCompaction', state, result?, error?}
  *                   {type:'settingsSaved', model, apiFormat, vendorId} / {type:'settingsError', message}
  *                   {type:'permissionModeSaved', permissionMode}
  *                   {type:'mcpStatus', name, status, error?, toolCount?}
@@ -195,6 +196,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     view.webview.onDidReceiveMessage((msg) => {
       if (msg.type === 'send' && typeof msg.text === 'string') {
         void this.send(msg.text);
+      } else if (msg.type === 'compact') {
+        void this.compactContext();
       } else if (msg.type === 'clear') {
         void this.clear();
       } else if (msg.type === 'newSession') {
@@ -1255,7 +1258,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const live = await this.getConfig();
     const workspaceRoots = this.workspaceRoots();
     const paths = this.sessionCatalog.pathsFor(this.activeSessionId);
-    const config: DurableRunConfig = {
+    const config = this.createRunConfig(live, paths, workspaceRoots);
+    await this.sessionCatalog.touch(this.activeSessionId, titleFromUserText(text));
+    await this.postSessions();
+    await this.coordinator!.start(text, config, live.apiKey);
+  }
+
+  private createRunConfig(
+    live: Awaited<ReturnType<ChatViewProvider['getConfig']>>,
+    paths: ReturnType<ChatSessionCatalog['pathsFor']>,
+    workspaceRoots: string[],
+  ): DurableRunConfig {
+    return {
       baseUrl: live.baseUrl,
       model: live.model,
       provider: live.provider,
@@ -1281,9 +1295,27 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         ...(live.jev.minConfidence === undefined ? {} : { minConfidence: live.jev.minConfidence }),
       },
     };
-    await this.sessionCatalog.touch(this.activeSessionId, titleFromUserText(text));
-    await this.postSessions();
-    await this.coordinator!.start(text, config, live.apiKey);
+  }
+
+  private async compactContext(): Promise<void> {
+    this.post({ type: 'contextCompaction', state: 'started' });
+    try {
+      await this.ensureRuntime();
+      const live = await this.getConfig();
+      const workspaceRoots = this.workspaceRoots();
+      const paths = this.sessionCatalog.pathsFor(this.activeSessionId);
+      const result = await this.coordinator!.compactCurrentContext(
+        this.createRunConfig(live, paths, workspaceRoots),
+        live.apiKey,
+      );
+      await this.sessionCatalog.touch(this.activeSessionId);
+      await this.postSessions();
+      this.post({ type: 'contextCompaction', state: 'completed', result });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.log.appendLine(`[context] 手动压缩失败: ${message}`);
+      this.post({ type: 'contextCompaction', state: 'failed', error: message });
+    }
   }
 
   private async resolveApproval(msg: { runId?: string; approvalId?: string; approve?: boolean }): Promise<void> {
@@ -1493,7 +1525,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   <div class="composer">
     <div class="composer-box">
-      <textarea id="input" rows="1" placeholder="请输入需求…(/指令 @文件 后续支持)"></textarea>
+        <textarea id="input" rows="1" placeholder="请输入需求…（输入 /compact 手动压缩上下文）"></textarea>
       <div class="composer-bar">
         <div class="left">
           <div class="permission-menu-wrap">

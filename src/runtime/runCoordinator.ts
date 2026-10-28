@@ -39,6 +39,7 @@ import { AgentEventFactory, type AgentProtocolEvent } from '../protocol/events';
 import { createAgentResult } from '../protocol/results';
 import {
   ensureContextCompacted,
+  resolveContextCompactionPolicy,
   type ContextCompactionResult,
   type ContextManagerOptions,
 } from './contextManager';
@@ -432,6 +433,8 @@ export class RunCoordinator {
   private readonly toolRegistry: ToolRegistry;
   private readonly workflowDecisionService: WorkflowDecisionService;
   private busy = false;
+  /** Prevent a manual context compaction from racing a new agent turn. */
+  private manualCompactionInProgress = false;
   private transitioning = false;
   private controller?: AbortController;
   private activeDone?: Promise<void>;
@@ -608,11 +611,51 @@ export class RunCoordinator {
 
   async hasActiveWork(): Promise<boolean> {
     return this.busy ||
+      this.manualCompactionInProgress ||
       this.transitioning ||
       this.clearing ||
       !!this.initializeOperation ||
       this.pendingClarifications.size > 0 ||
       !!(await this.store.getActive());
+  }
+
+  /**
+   * Compact the persisted session without creating an agent run.
+   *
+   * The UI uses this for the explicit `/compact` command. Keeping the call in
+   * the coordinator ensures it operates on the same session and compactor as
+   * automatic checkpoints, while the manual operation itself never enters the
+   * durable run store or the model conversation.
+   */
+  async compactCurrentContext(
+    config: DurableRunConfig,
+    apiKey: string,
+  ): Promise<ContextCompactionResult> {
+    if (this.manualCompactionInProgress) {
+      throw new Error('上下文压缩已经在进行中');
+    }
+    this.manualCompactionInProgress = true;
+    try {
+      if (this.busy || this.transitioning || this.clearing || await this.store.getActive()) {
+        throw new Error('当前会话有任务正在运行或等待处理，请完成后再压缩上下文');
+      }
+      await this.initialize();
+      const agentConfig = this.agentConfig(config, apiKey);
+      const managed = await createManagedContextSession(this.session, agentConfig, {
+        compact: (session, contextConfig, options) =>
+          this.compactContextForAgent(session, contextConfig, options),
+        log: this.writeLog,
+      });
+      const checkpoint = await managed.runInitialCheckpoint();
+      return {
+        ...checkpoint,
+        triggerMode: config.modelContext
+          ? resolveContextCompactionPolicy(config.modelContext).triggerMode
+          : 'legacy_threshold',
+      };
+    } finally {
+      this.manualCompactionInProgress = false;
+    }
   }
 
   async resolveClarification(
@@ -914,7 +957,7 @@ export class RunCoordinator {
   }
 
   async start(userText: string, config: DurableRunConfig, apiKey: string): Promise<void> {
-    if (this.busy || this.transitioning || this.clearing) return;
+    if (this.busy || this.manualCompactionInProgress || this.transitioning || this.clearing) return;
     const generation = this.beginTransition();
     try {
       const continuable = await this.store.getContinuable();

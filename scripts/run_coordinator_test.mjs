@@ -58,6 +58,47 @@ async function fixture(executeAgent, planTask, team = {}) {
   await fs.rm(test.dir, { recursive: true, force: true });
 }
 
+// Manual `/compact` uses the same coordinator compactor as automatic checkpoints,
+// but must not create a durable agent run or add the command to the session.
+{
+  let compactionCalls = 0;
+  const test = await fixture(
+    async () => {
+      throw new Error('manual compaction must not execute the agent');
+    },
+    undefined,
+    {
+      compactContext: async (_session, receivedConfig) => {
+        compactionCalls += 1;
+        if (receivedConfig.apiKey !== 'key') throw new Error('manual compaction did not receive the API key');
+        return {
+          compacted: true,
+          beforeItems: 20,
+          afterItems: 5,
+          beforeCharacters: 10_000,
+          afterCharacters: 2_000,
+          beforeTokens: 4_000,
+          afterTokens: 800,
+          inputBudgetTokens: 2_000,
+          triggerMode: 'token_budget',
+          postCompactionBudgetSatisfied: true,
+        };
+      },
+    },
+  );
+  const result = await test.coordinator.compactCurrentContext(config, 'key');
+  const lastRun = await test.store.getLast();
+  if (
+    compactionCalls !== 1 ||
+    result.compacted !== true ||
+    result.afterItems !== 5 ||
+    lastRun !== undefined
+  ) {
+    throw new Error('manual context compaction did not stay outside the agent run lifecycle');
+  }
+  await fs.rm(test.dir, { recursive: true, force: true });
+}
+
 // Preflight progress is host-only UI state. It must arrive in lifecycle order
 // without changing the replayable protocol event history.
 {
