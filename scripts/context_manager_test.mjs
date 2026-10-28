@@ -158,6 +158,7 @@ try {
     assert.deepEqual(LEGACY_CONTEXT_COMPACTION_DEFAULTS, {
       maxItems: 48,
       maxCharacters: 200_000,
+      unknownMaxCharacters: 80_000,
       recentItems: 16,
       maxSummaryInputCharacters: 60_000,
     });
@@ -503,6 +504,17 @@ try {
       unknownWindowPolicy.legacy.maxCharacters,
       UNKNOWN_CONTEXT_MAX_CHARACTERS,
       '未知模型窗口不能直接使用 200000 字符阈值',
+    );
+    const widenedUnknownWindowPolicy = resolveContextCompactionPolicy({
+      compaction: {
+        maxCharacters: LEGACY_CONTEXT_COMPACTION_DEFAULTS.maxCharacters,
+        unknownMaxCharacters: LEGACY_CONTEXT_COMPACTION_DEFAULTS.maxCharacters,
+      },
+    });
+    assert.equal(
+      widenedUnknownWindowPolicy.legacy.maxCharacters,
+      LEGACY_CONTEXT_COMPACTION_DEFAULTS.maxCharacters,
+      '未知模型窗口可以通过显式 unknownMaxCharacters 放宽到 200000',
     );
     const knownWindowPolicy = resolveContextCompactionPolicy({
       contextWindowTokens: 128_000,

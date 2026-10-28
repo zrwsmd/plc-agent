@@ -24,6 +24,8 @@ export interface LegacyContextCompactionBudget {
   maxItems?: number;
   /** @deprecated Use maxInputTokens or the model context window instead. */
   maxCharacters?: number;
+  /** Character ceiling used only when a model profile has no known context window. */
+  unknownMaxCharacters?: number;
   /** Minimum recent item count; retention expands to the containing full user turn. */
   recentItems?: number;
   /** Retained in both modes to bound the summarizer input. */
@@ -98,6 +100,8 @@ export interface ContextManagerOptions {
   maxItems?: number;
   /** @deprecated Use modelContext.compaction.maxInputTokens instead. */
   maxCharacters?: number;
+  /** Character ceiling for a model profile whose context window is unknown. */
+  unknownMaxCharacters?: number;
   /** Retained as a compaction-shaping option in both trigger modes. */
   recentItems?: number;
   /** Retained as a compaction-shaping option in both trigger modes. */
@@ -135,13 +139,14 @@ export interface ContextCompactionResult {
 export const LEGACY_CONTEXT_COMPACTION_DEFAULTS: Required<LegacyContextCompactionBudget> = {
   maxItems: 48,
   maxCharacters: 200_000,
+  unknownMaxCharacters: 80_000,
   recentItems: 16,
   maxSummaryInputCharacters: 60_000,
 };
 
-// A profile with no known model window must not wait until the 200k-character
-// legacy threshold. This is a conservative input budget for unknown/local
-// models; a known context window or explicit token budget still wins.
+// Unknown/local models use a separate conservative ceiling. The normal
+// maxCharacters setting remains 200k for legacy callers and known-window
+// profiles; callers can explicitly raise this value when the model supports it.
 export const UNKNOWN_CONTEXT_MAX_CHARACTERS = 80_000;
 
 export async function ensureContextCompacted(
@@ -361,13 +366,17 @@ export function resolveContextCompactionPolicy(
   modelContext?: ModelContextProfile,
   options: Pick<
     ContextManagerOptions,
-    'maxItems' | 'maxCharacters' | 'recentItems' | 'maxSummaryInputCharacters'
+    'maxItems' | 'maxCharacters' | 'unknownMaxCharacters' | 'recentItems' | 'maxSummaryInputCharacters'
   > = {},
 ): ResolvedContextCompactionPolicy {
   const budget = modelContext?.compaction;
   const configuredMaxCharacters = positiveIntegerOrDefault(
     options.maxCharacters ?? budget?.maxCharacters,
     LEGACY_CONTEXT_COMPACTION_DEFAULTS.maxCharacters,
+  );
+  const configuredUnknownMaxCharacters = positiveIntegerOrDefault(
+    options.unknownMaxCharacters ?? budget?.unknownMaxCharacters,
+    LEGACY_CONTEXT_COMPACTION_DEFAULTS.unknownMaxCharacters,
   );
   const hasKnownContextWindow = positiveInteger(modelContext?.contextWindowTokens) !== undefined;
   const hasExplicitTokenBudget = positiveInteger(budget?.maxInputTokens) !== undefined;
@@ -377,8 +386,9 @@ export function resolveContextCompactionPolicy(
       LEGACY_CONTEXT_COMPACTION_DEFAULTS.maxItems,
     ),
     maxCharacters: modelContext !== undefined && !hasKnownContextWindow && !hasExplicitTokenBudget
-      ? Math.min(configuredMaxCharacters, UNKNOWN_CONTEXT_MAX_CHARACTERS)
+      ? Math.min(configuredUnknownMaxCharacters, configuredMaxCharacters)
       : configuredMaxCharacters,
+    unknownMaxCharacters: configuredUnknownMaxCharacters,
     recentItems: Math.max(
       2,
       positiveIntegerOrDefault(
@@ -653,6 +663,10 @@ function enforcePostCompactionBudget(
   for (let index = 2; exceeds() && index < bounded.length;) {
     const currentUserIndex = findLastUserMessageIndex(bounded);
     const item = bounded[index];
+    if (isToolEventItem(item)) {
+      removeToolEventGroupAt(bounded, index);
+      continue;
+    }
     if (index !== currentUserIndex && !isUserMessageItem(item)) {
       bounded.splice(index, 1);
       continue;

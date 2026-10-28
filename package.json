@@ -226,7 +226,13 @@
           "type": "integer",
           "minimum": 1,
           "default": 200000,
-          "description": "兼容旧配置：已知模型窗口或纯旧调用方可使用该字符阈值；现代但未知模型窗口会自动采用更保守的上限；token 预算有效时忽略"
+          "description": "字符压缩阈值：纯旧调用方使用；已知模型窗口或 token 预算有效时忽略；未知模型窗口使用单独的保守阈值"
+        },
+        "plcAgent.context.compaction.unknownMaxCharacters": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 80000,
+          "description": "未配置模型上下文窗口时使用的字符压缩阈值；确认模型支持更大上下文后可显式调高"
         },
         "plcAgent.context.compaction.recentItems": {
           "type": "integer",
