@@ -107,6 +107,14 @@ assert(
 
 const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'devuni-command-test-'));
 
+// 建工程前会先看磁盘判断父目录在不在、下面有没有同名工程,
+// 所以父目录必须用真实存在的空临时目录,不能写死盘符。
+async function makeEmptyParent(tag) {
+  const dir = path.join(workspace, tag);
+  await fs.mkdir(dir, { recursive: true });
+  return dir;
+}
+
 const initInfoReply = {
   status: true,
   initInfo: {
@@ -157,7 +165,7 @@ async function buildTool(port) {
     {},
     JSON.stringify({
       projectName: 'demo',
-      projectPath: 'E:\\',
+      projectPath: await makeEmptyParent('parent-3a'),
       deviceModel: 'SC5100',
     }),
     {},
@@ -195,7 +203,7 @@ async function buildTool(port) {
     {},
     JSON.stringify({
       projectName: 'x',
-      projectPath: 'E:\\',
+      projectPath: await makeEmptyParent('parent-3b'),
       deviceModel: 'SC5100',
       language: 'st',
       projectType: 'standard',
@@ -279,6 +287,7 @@ async function buildTool(port) {
 
 // [3d] 对方返回 status:false 时,必须变成 ok:false 并带上排查提示
 {
+  const emptyParent = await makeEmptyParent('parent-3d');
   const { port } = makePort((command) => {
     if (command === 'bridgeProjectInitInfo') return initInfoReply;
     return { status: false };
@@ -288,7 +297,7 @@ async function buildTool(port) {
     {},
     JSON.stringify({
       projectName: 'demo',
-      projectPath: 'E:\\',
+      projectPath: emptyParent,
       deviceModel: 'SC5100',
     }),
     {},
@@ -303,13 +312,14 @@ async function buildTool(port) {
 
 // [3e] 拿不到可选项且语言/类型没给全:应当直接报错,不要继续创建
 {
+  const emptyParent = await makeEmptyParent('parent-3e');
   const { port, calls } = makePort(() => ({ status: false }));
   const tool = await buildTool(port);
   const raw = await tool.invoke(
     {},
     JSON.stringify({
       projectName: 'demo',
-      projectPath: 'E:\\',
+      projectPath: emptyParent,
       deviceModel: 'SC5100',
     }),
     {},
@@ -319,6 +329,52 @@ async function buildTool(port) {
   assert(
     !calls.some((call) => call.command === 'bridgeCreateProject'),
     '拿不到可选项时不该继续调用建工程命令',
+  );
+}
+
+// [3e-2] 父目录不存在、同名工程已存在:错误必须点名该改哪一项,
+// 而且不能白跑一趟插件——这两种情况本地就能判定。
+{
+  const { port, calls } = makePort((command) => {
+    if (command === 'bridgeProjectInitInfo') return initInfoReply;
+    return { status: true };
+  });
+  const tool = await buildTool(port);
+
+  const missingParent = path.join(workspace, 'no-such-parent-3e2');
+  const missingRaw = await tool.invoke(
+    {},
+    JSON.stringify({ projectName: 'demo', projectPath: missingParent, deviceModel: 'SC5100' }),
+    {},
+  );
+  const missingResult = JSON.parse(missingRaw);
+  assert(missingResult.ok === false, `父目录不存在时应失败: ${missingRaw}`);
+  assert(
+    missingResult.error.includes('父目录不存在') &&
+      missingResult.error.includes('projectPath') &&
+      missingResult.error.includes('工程名不用改'),
+    `父目录不存在时应只让人改父目录: ${missingRaw}`,
+  );
+
+  const occupiedParent = path.join(workspace, 'occupied-parent-3e2');
+  await fs.mkdir(path.join(occupiedParent, 'demo'), { recursive: true });
+  const occupiedRaw = await tool.invoke(
+    {},
+    JSON.stringify({ projectName: 'demo', projectPath: occupiedParent, deviceModel: 'SC5100' }),
+    {},
+  );
+  const occupiedResult = JSON.parse(occupiedRaw);
+  assert(occupiedResult.ok === false, `同名工程已存在时应失败: ${occupiedRaw}`);
+  assert(
+    occupiedResult.error.includes('已经有同名工程') &&
+      occupiedResult.error.includes('projectName') &&
+      occupiedResult.error.includes('父目录不用改'),
+    `同名工程已存在时应只让人改工程名: ${occupiedRaw}`,
+  );
+
+  assert(
+    !calls.some((call) => call.command === 'bridgeCreateProject'),
+    '父目录不存在或同名工程已存在时不该去调建工程命令',
   );
 }
 

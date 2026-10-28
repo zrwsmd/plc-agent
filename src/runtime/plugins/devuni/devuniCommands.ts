@@ -11,6 +11,8 @@
  *   4. 返回怎么翻译      —— toOutcome(对方返回值 → 给模型看的结论)
  */
 import { z } from "zod";
+import { statSync } from "node:fs";
+import path from "node:path";
 import type { ToolResultAction } from "../../../protocol/results";
 import {
   checkDirectoryPath,
@@ -216,6 +218,82 @@ const createProjectParameters = z.object({
 
 type CreateProjectInput = z.infer<typeof createProjectParameters>;
 
+/** 看一眼磁盘上这个路径现在是什么。 */
+type PathKind = "directory" | "file" | "other" | "missing" | "error";
+
+function readPathKind(target: string): { kind: PathKind; message?: string } {
+  try {
+    const stat = statSync(target);
+    if (stat.isDirectory()) return { kind: "directory" };
+    if (stat.isFile()) return { kind: "file" };
+    return { kind: "other" };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      return { kind: "missing" };
+    }
+    return {
+      kind: "error",
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/**
+ * 建工程失败最常见的两种原因是父目录不存在、这个父目录下已经有同名工程。
+ * 插件那边只回一个 status:false，不带原因，模型拿到一句"常见原因"就自己猜，
+ * 猜成父目录就只让用户改父目录——可要是撞的是工程名，换个父目录还是同一个名字，
+ * 点几次都是同一个结果。
+ *
+ * 所以在调插件之前先把能确定的确定掉，错误里直接写明该改哪一项。
+ * 返回 undefined 表示目标位置没问题，可以交给插件去建。
+ */
+function diagnoseProjectTarget(
+  projectPath: string,
+  projectName: string,
+): string | undefined {
+  const parent = readPathKind(projectPath);
+  if (parent.kind === "missing") {
+    return (
+      `父目录不存在:${projectPath}。` +
+      "只需要重新确认父目录(projectPath),给一个已经存在的目录;工程名不用改。"
+    );
+  }
+  if (parent.kind === "file" || parent.kind === "other") {
+    return (
+      `父目录不是一个目录:${projectPath}。` +
+      "只需要重新确认父目录(projectPath);工程名不用改。"
+    );
+  }
+  if (parent.kind === "error") {
+    return (
+      `读不到父目录 ${projectPath}:${parent.message}。` +
+      "只需要重新确认父目录(projectPath);工程名不用改。"
+    );
+  }
+
+  const target = path.join(projectPath, projectName);
+  const existing = readPathKind(target);
+  if (existing.kind === "directory") {
+    return (
+      `这个父目录下已经有同名工程:${target}。` +
+      "只需要重新确认工程名(projectName),换一个名字;父目录不用改。"
+    );
+  }
+  if (existing.kind === "file" || existing.kind === "other") {
+    return (
+      `目标路径上已经有一个同名文件:${target}。` +
+      "只需要重新确认工程名(projectName),换一个名字;父目录不用改。"
+    );
+  }
+  if (existing.kind === "error") {
+    return (
+      `读不到目标路径 ${target}:${existing.message}。` +
+      "只需要重新确认工程名(projectName);父目录不用改。"
+    );
+  }
+  return undefined;
+}
+
 const createProjectCommand = defineDevuniCommand<CreateProjectInput>({
   toolName: "devuni_create_project",
   bridgeCommand: "bridgeCreateProject",
@@ -225,6 +303,8 @@ const createProjectCommand = defineDevuniCommand<CreateProjectInput>({
     "projectPath 必须是已经存在的父目录。" +
     "工程类型、工程语言、设备型号、父目录或工程名不明确时,先用 request_clarification 逐项确认,不要依赖默认值。" +
     "问父目录那一步的 id 用 projectPath,问工程名那一步的 id 用 projectName,弹窗会按这两个 id 套上格式校验。" +
+    "创建失败后重新确认时,只把失败原因点名的那一项放出来让用户改,另一项沿用原值,不要两项一起重问;" +
+    "失败原因没点名父目录或工程名(例如设备型号不被支持)时,这两项都不要改。" +
     "设备型号是必填项,必须从 devuni_project_options 的候选中选择,不能使用插件默认型号代替用户确认。" +
     "创建成功后由运行时等待当前任务完整结束，再在新窗口打开工程并建立新的工程会话;" +
     "属于写操作,执行前需要用户在界面批准。",
@@ -257,6 +337,12 @@ const createProjectCommand = defineDevuniCommand<CreateProjectInput>({
     const pathProblem = checkDirectoryPath(input.projectPath);
     if (pathProblem) {
       throw new Error(`工程父目录不合法:${pathProblem}。`);
+    }
+    // 格式没问题还不够:父目录在不在、下面有没有同名工程,插件只会回一句
+    // status:false 不带原因。这里先看磁盘,把"该改哪一项"写死在错误里。
+    const targetProblem = diagnoseProjectTarget(input.projectPath, input.projectName);
+    if (targetProblem) {
+      throw new Error(targetProblem);
     }
     // 语言/类型没给全时才去问对方要可选项;设备型号必须由模型先向用户确认。
     if (!input.deviceModel) {
@@ -299,13 +385,15 @@ const createProjectCommand = defineDevuniCommand<CreateProjectInput>({
       return { ok: false, error: "devUni 插件返回了无法识别的内容。", data: raw };
     }
     if (raw.status !== true) {
-      const detail = typeof raw.error === "string" ? raw.error : undefined;
+      const detail = typeof raw.error === "string" ? raw.error.trim() : "";
       return {
         ok: false,
         error: detail
           ? `创建工程失败:${detail}`
-          : "创建工程失败。常见原因:父目录不存在、工程名里含 \".\"、" +
-            "同路径下已有同名工程、设备型号不在支持列表里。",
+          : "创建工程失败。父目录和工程名在本地已经检查过:父目录存在,下面也没有同名工程," +
+            "所以不是这两项的问题,不要再让用户改父目录或工程名。" +
+            "常见原因是设备型号不在插件支持列表里,或 devUni 插件当前不可用。" +
+            "把这条失败原因如实告诉用户。",
         data: raw,
       };
     }
