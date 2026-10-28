@@ -53,6 +53,7 @@ export * from '../src/runtime/modelAdapter';
 export * from '../src/runtime/oneShotToolChoiceModel';
 export * from '../src/runtime/taskPlan';
 export * from '../src/runtime/contextManager';
+export * from '../src/runtime/contextStateLedger';
 export * from '../src/runtime/contextSession';
 export * from '../src/runtime/contextTokenEstimator';
 export * from '../src/runtime/completionGate';

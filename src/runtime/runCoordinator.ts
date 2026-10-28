@@ -987,6 +987,9 @@ export class RunCoordinator {
               `[context] 初始历史检查已压缩: items ${compaction.beforeItems}->${compaction.afterItems}, ` +
                 `chars ${compaction.beforeCharacters}->${compaction.afterCharacters}`,
             );
+            if (compaction.postCompactionBudgetSatisfied === false) {
+              this.writeLog('[context] 警告: 压缩后最小上下文仍超过预算，请增大上下文预算或缩短当前请求');
+            }
             sessionItems = await this.session.getItems();
             run.sessionItemCountBefore = sessionItems.length;
             await this.store.update(run);
@@ -1028,6 +1031,9 @@ export class RunCoordinator {
           this.writeLog(
             `[context] 已压缩历史: items ${compaction.beforeItems}->${compaction.afterItems}, chars ${compaction.beforeCharacters}->${compaction.afterCharacters}${tokenDetail}, reason=${compaction.reason ?? 'unknown'}`,
           );
+          if (compaction.postCompactionBudgetSatisfied === false) {
+            this.writeLog('[context] 警告: 压缩后最小上下文仍超过预算，请增大上下文预算或缩短当前请求');
+          }
           if (compaction.error) {
             this.writeLog(`[context] 摘要失败，已使用确定性保底裁剪: ${compaction.error}`);
           }
@@ -2072,6 +2078,9 @@ export class RunCoordinator {
             `[context] 执行前历史检查已压缩: items ${initialCompaction.beforeItems}->${initialCompaction.afterItems}, ` +
               `chars ${initialCompaction.beforeCharacters}->${initialCompaction.afterCharacters}`,
           );
+          if (initialCompaction.postCompactionBudgetSatisfied === false) {
+            this.writeLog('[context] 警告: 压缩后最小上下文仍超过预算，请增大上下文预算或缩短当前请求');
+          }
           run.sessionItemCountBefore = initialCompaction.afterItems;
           await this.store.update(run);
         } else if (initialCompaction.error) {

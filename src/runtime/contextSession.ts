@@ -56,6 +56,7 @@ export interface ContextCheckpointResult {
   beforeCharacters: number;
   afterCharacters: number;
   error?: string;
+  postCompactionBudgetSatisfied?: boolean;
   mode: ContextSessionMode;
 }
 
@@ -415,6 +416,7 @@ async function runLocalCheckpoint(
     beforeCharacters: result.beforeCharacters,
     afterCharacters: result.afterCharacters,
     error: result.error,
+    postCompactionBudgetSatisfied: result.postCompactionBudgetSatisfied,
     mode,
   };
 }

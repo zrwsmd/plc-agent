@@ -4,7 +4,9 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   CONTEXT_SUMMARY_MARKER,
+  CONTEXT_STATE_LEDGER_MARKER,
   CONTEXT_TOOL_RESULT_CLIP_MARKER,
+  buildContextStateLedger,
   ensureContextCompacted,
   applyTokenEstimateCalibration,
   estimateItemsTokens,
@@ -16,6 +18,8 @@ import {
   JsonFileSession,
   LEGACY_CONTEXT_COMPACTION_DEFAULTS,
   modelContextCalibrationRouteKey,
+  parseContextStateLedgerItem,
+  resolveRecentTurnBoundary,
   resolveContextCompactionPolicy,
   resolveInputTokenBudget,
   updateTokenEstimateCalibration,
@@ -152,7 +156,7 @@ try {
     assert.equal(resolveInputTokenBudget({ contextWindowTokens: 4_000, reservedOutputTokens: 4_096 }), undefined);
     assert.deepEqual(LEGACY_CONTEXT_COMPACTION_DEFAULTS, {
       maxItems: 48,
-      maxCharacters: 80_000,
+      maxCharacters: 200_000,
       recentItems: 16,
       maxSummaryInputCharacters: 60_000,
     });
@@ -209,13 +213,14 @@ try {
     assert.equal(result.triggerMode, 'legacy_threshold');
     assert.equal(summarizedOlder, 4);
     const items = await session.getItems();
-    assert.equal(items.length, 5);
+    assert.equal(items.length, 6);
     assert.equal(items[0].role, 'system');
     assert.match(items[0].content, new RegExp(CONTEXT_SUMMARY_MARKER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-    assert.equal(items[1].content, 'old user 1');
-    assert.equal(items[2].content, 'old user 2');
-    assert.equal(items[3].content, 'recent user');
-    assert.equal(items[4].content, 'recent assistant');
+    assert.match(items[1].content, new RegExp(CONTEXT_STATE_LEDGER_MARKER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.equal(items[2].content, 'old user 1');
+    assert.equal(items[3].content, 'old user 2');
+    assert.equal(items[4].content, 'recent user');
+    assert.equal(items[5].content, 'recent assistant');
 
     const visible = extractChatMessages(items);
     assert.deepEqual(visible.map((message) => message.text), [
@@ -330,10 +335,11 @@ try {
     assert.equal(result.reason, 'summary_failed_emergency_fallback');
     assert.match(result.error, /summary service unavailable/);
     const compacted = await session.getItems();
-    assert.ok(compacted.length < 6);
+    assert.ok(compacted.length <= 7);
     assert.ok(compacted.some((item) => item.content === '必须保留的旧用户约束'));
     assert.match(compacted[0].content, new RegExp(CONTEXT_SUMMARY_MARKER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
     assert.match(compacted[0].content, /保底/);
+    assert.ok(compacted.some((item) => String(item.content ?? '').includes(CONTEXT_STATE_LEDGER_MARKER)));
   }
 
   {
@@ -421,7 +427,12 @@ try {
     assert.equal(result.beforeTokens, beforeTokens);
     assert.equal(result.inputBudgetTokens, beforeTokens - 1);
     assert.match(result.reason, /^tokens>/);
-    assert.equal((await session.getItems()).length, 4);
+    assert.equal((await session.getItems()).length, 3);
+    assert.equal(
+      result.postCompactionBudgetSatisfied,
+      false,
+      '小于最小摘要、账本和当前请求集合的预算必须明确报告无法满足',
+    );
   }
 
   {
@@ -516,7 +527,97 @@ try {
     assert.equal(items[0].content, 'fresh');
   }
 
-  console.log('context manager tests passed: bounded compaction, hidden summary, atomic replace');
+  {
+    const turnItems = [
+      { type: 'message', role: 'user', content: '旧轮次' },
+      { type: 'message', role: 'assistant', content: '旧回复' },
+      { type: 'message', role: 'user', content: '当前工具密集轮次' },
+      ...Array.from({ length: 12 }, (_, index) => ({
+        type: index % 2 === 0 ? 'function_call' : 'function_call_output',
+        call_id: `call-${Math.floor(index / 2)}`,
+        name: 'read_file',
+        ...(index % 2 === 0
+          ? { arguments: JSON.stringify({ path: `file-${index}.st` }) }
+          : { output: JSON.stringify({ ok: true, effect: 'none', risk: 'read', data: {} }) }),
+      })),
+    ];
+    assert.equal(
+      resolveRecentTurnBoundary(turnItems, 4),
+      2,
+      '最近窗口必须向前扩展到当前完整用户轮次的起点',
+    );
+  }
+
+  {
+    const ledger = buildContextStateLedger([
+      { type: 'message', role: 'user', content: '修改并交付 PumpControl.st' },
+      {
+        type: 'function_call',
+        call_id: 'write-1',
+        name: 'write_file',
+        arguments: JSON.stringify({ path: 'PumpControl.st', contentHash: 'sha-final' }),
+      },
+      {
+        type: 'function_call_output',
+        call_id: 'write-1',
+        name: 'write_file',
+        output: JSON.stringify({
+          ok: true,
+          effect: 'filesystem',
+          risk: 'write',
+          data: {
+            file: 'PumpControl.st',
+            contentHash: 'sha-final',
+            deliveryCommit: { commitId: 'delivery-commit-1', path: 'PumpControl.st' },
+          },
+        }),
+      },
+    ]);
+    assert.equal(ledger.currentTask.userRequest, '修改并交付 PumpControl.st');
+    assert.equal(ledger.tools.at(-1).name, 'write_file');
+    assert.equal(ledger.tools.at(-1).outcome, 'ok');
+    assert.equal(ledger.tools.at(-1).target, 'PumpControl.st');
+    assert.ok(ledger.resources.some((fact) => fact.kind === 'hash' && fact.value === 'sha-final'));
+    assert.ok(ledger.deliveryEvidence.some((fact) => fact.value === 'delivery-commit-1'));
+  }
+
+  {
+    const session = new JsonFileSession(path.join(dir, 'post-budget-session.json'));
+    const noisyToolOutput = Array.from(
+      { length: 80 },
+      (_, index) => `tool-${index}-${'x'.repeat(80)}`,
+    ).join('\n');
+    await session.addItems([
+      { type: 'message', role: 'user', content: `旧需求一${'甲'.repeat(5_000)}` },
+      { type: 'message', role: 'assistant', content: '旧回复一' },
+      { type: 'message', role: 'user', content: `旧需求二${'乙'.repeat(5_000)}` },
+      { type: 'message', role: 'assistant', content: '旧回复二' },
+      { type: 'message', role: 'user', content: '当前需求' },
+      { type: 'function_call_output', call_id: 'read-1', name: 'read_file', output: noisyToolOutput },
+    ]);
+    const result = await ensureContextCompacted(session, cfg, {
+      maxCharacters: 3_000,
+      recentItems: 2,
+      summarize: async () => ({
+        summary: '较早需求已经汇总。',
+        userPreferences: [],
+        durableFacts: [],
+        importantFiles: [],
+        openTasks: [],
+        risks: [],
+      }),
+    });
+    assert.equal(result.compacted, true);
+    assert.ok(result.afterCharacters <= 3_000, '压缩后必须重新收缩到字符预算以内');
+    assert.equal(result.postCompactionBudgetSatisfied, true);
+    const compacted = await session.getItems();
+    const ledgerItem = compacted.find((item) => String(item.content ?? '').includes(CONTEXT_STATE_LEDGER_MARKER));
+    assert.ok(ledgerItem);
+    assert.equal(parseContextStateLedgerItem(ledgerItem).currentTask.userRequest, '当前需求');
+    assert.ok(compacted.some((item) => item.content === '当前需求'));
+  }
+
+  console.log('context manager tests passed: bounded compaction, runtime ledger, full-turn retention');
 } finally {
   await fs.rm(dir, { recursive: true, force: true });
 }

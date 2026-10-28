@@ -3,6 +3,12 @@ import { z } from 'zod';
 import { buildModelAdapter } from './modelGateway';
 import type { AgentConfig } from './agentConfig';
 import { estimateItemsTokens } from './contextTokenEstimator';
+import {
+  buildContextStateLedger,
+  compactContextStateLedgerItem,
+  createContextStateLedgerItem,
+  isContextStateLedgerItem,
+} from './contextStateLedger';
 
 export const CONTEXT_SUMMARY_MARKER = '[plc-agent-context-summary:v1]';
 export const CONTEXT_TOOL_RESULT_CLIP_MARKER = '[tool-result-context-clipped]';
@@ -18,7 +24,7 @@ export interface LegacyContextCompactionBudget {
   maxItems?: number;
   /** @deprecated Use maxInputTokens or the model context window instead. */
   maxCharacters?: number;
-  /** Retained in both modes to control how many recent items remain verbatim. */
+  /** Minimum recent item count; retention expands to the containing full user turn. */
   recentItems?: number;
   /** Retained in both modes to bound the summarizer input. */
   maxSummaryInputCharacters?: number;
@@ -121,13 +127,14 @@ export interface ContextCompactionResult {
   afterTokens?: number;
   inputBudgetTokens?: number;
   triggerMode?: 'token_budget' | 'legacy_threshold';
+  postCompactionBudgetSatisfied?: boolean;
   reason?: string;
   error?: string;
 }
 
 export const LEGACY_CONTEXT_COMPACTION_DEFAULTS: Required<LegacyContextCompactionBudget> = {
   maxItems: 48,
-  maxCharacters: 80_000,
+  maxCharacters: 200_000,
   recentItems: 16,
   maxSummaryInputCharacters: 60_000,
 };
@@ -173,11 +180,7 @@ export async function ensureContextCompacted(
     };
   }
 
-  const recentCount = Math.max(
-    2,
-    Math.min(items.length - 1, policy.legacy.recentItems),
-  );
-  const splitAt = Math.max(1, items.length - recentCount);
+  const splitAt = resolveRecentTurnBoundary(items, policy.legacy.recentItems);
   const olderItems = items.slice(0, splitAt);
   const recentItems = items.slice(splitAt);
   if (!olderItems.length) {
@@ -197,9 +200,14 @@ export async function ensureContextCompacted(
 
   notifyCompactionState(options, 'started');
 
+  const runtimeLedgerItem = createContextStateLedgerItem(buildContextStateLedger(items));
   const priorSummaryItems = [...olderItems, ...recentItems].filter(isContextSummaryItem);
-  const olderContentItems = olderItems.filter((item) => !isContextSummaryItem(item));
-  const recentContentItems = recentItems.filter((item) => !isContextSummaryItem(item));
+  const olderContentItems = olderItems.filter(
+    (item) => !isContextSummaryItem(item) && !isContextStateLedgerItem(item),
+  );
+  const recentContentItems = recentItems.filter(
+    (item) => !isContextSummaryItem(item) && !isContextStateLedgerItem(item),
+  );
   const protectedUserItems = olderContentItems.filter(isUserMessageItem);
   const summaryInputOlderItems = olderContentItems.map(compactToolResultItem);
   const summaryInputRecentItems = recentContentItems.map(compactToolResultItem);
@@ -215,11 +223,19 @@ export async function ensureContextCompacted(
       priorSummaryItems,
       protectedUserItems,
     );
-    const compactedItems = [
+    const candidateItems = [
       createSummaryItem(summary),
+      runtimeLedgerItem,
       ...protectedUserItems,
       ...recentContentItems.map(compactToolResultItem),
     ];
+    const compactedItems = enforcePostCompactionBudget(
+      candidateItems,
+      2,
+      protectedUserItems.length,
+      policy,
+      modelContext,
+    );
     await session.replaceItems(compactedItems);
     const afterCharacters = estimateItemsCharacters(compactedItems);
     const afterTokens = inputBudgetTokens === undefined
@@ -235,6 +251,11 @@ export async function ensureContextCompacted(
       afterTokens,
       inputBudgetTokens,
       triggerMode,
+      postCompactionBudgetSatisfied: isWithinCompactionBudget(
+        compactedItems,
+        policy,
+        modelContext,
+      ),
       reason: inputBudgetTokens === undefined
         ? [
           tooManyItems ? `items>${maxItems}` : '',
@@ -256,6 +277,7 @@ export async function ensureContextCompacted(
         afterTokens: beforeTokens,
         inputBudgetTokens,
         triggerMode,
+        postCompactionBudgetSatisfied: false,
         reason: 'aborted',
       };
       notifyCompactionState(options, 'failed', result);
@@ -264,12 +286,13 @@ export async function ensureContextCompacted(
     const originalError = error instanceof Error
       ? `${error.name}: ${error.message}`
       : String(error);
-    const fallbackItems = [
+    const fallbackItems = enforcePostCompactionBudget([
       createEmergencySummaryItem(),
+      runtimeLedgerItem,
       ...priorSummaryItems,
       ...protectedUserItems,
       ...recentContentItems.map(compactToolResultItem),
-    ];
+    ], 2 + priorSummaryItems.length, protectedUserItems.length, policy, modelContext);
     try {
       await session.replaceItems(fallbackItems);
       const afterCharacters = estimateItemsCharacters(fallbackItems);
@@ -286,6 +309,11 @@ export async function ensureContextCompacted(
         afterTokens,
         inputBudgetTokens,
         triggerMode,
+        postCompactionBudgetSatisfied: isWithinCompactionBudget(
+          fallbackItems,
+          policy,
+          modelContext,
+        ),
         reason: 'summary_failed_emergency_fallback',
         error: originalError,
       };
@@ -422,7 +450,7 @@ export async function summarizeContextWithModel(
       '你是长对话上下文压缩器，只做摘要，不执行工具。' +
       '把较早历史压缩成后续任务仍需要的事实、约束、用户偏好、重要文件、未完成事项和风险。' +
       '不要发明历史里没有的信息；不要保留寒暄、重复内容或已经无关的细节。' +
-      '最近若干条原文会被保留，因此只摘要更早历史。已有的历史压缩摘要和用户约束会单独提供，' +
+      '最近若干完整轮次会被保留，因此只摘要更早历史。已有的历史压缩摘要和用户约束会单独提供，' +
       '必须把它们当作已确认事实合并，不能把它们当普通对话重新压缩。' +
       '必须严格返回 schema，不要输出 markdown。',
   });
@@ -442,7 +470,7 @@ export async function summarizeContextWithModel(
         '较早历史：',
         serializeItemsForSummary(olderItems, maxInputCharacters),
         '',
-        '以下最近历史会被原样保留，你只需避免与它重复：',
+        '以下最近完整轮次会被保留，你只需避免与它重复：',
         serializeItemsForSummary(recentItems, Math.min(12_000, Math.floor(maxInputCharacters / 4))),
       ].join('\n'),
     } as unknown as AgentInputItem,
@@ -546,6 +574,174 @@ function compactToolResultItem(item: AgentInputItem): AgentInputItem {
     ...value,
     [field]: compacted,
   } as unknown as AgentInputItem;
+}
+
+/**
+ * Keep the configured recent window intact, extending it to the user message
+ * that begins the containing turn so tool-heavy turns are never split.
+ */
+export function resolveRecentTurnBoundary(
+  items: readonly AgentInputItem[],
+  recentItemTarget: number,
+): number {
+  if (items.length <= 1) return 0;
+  const target = Math.max(2, Math.min(items.length - 1, Math.floor(recentItemTarget)));
+  const nominal = Math.max(1, items.length - target);
+  for (let index = nominal; index >= 1; index -= 1) {
+    if (isUserMessageItem(items[index])) return index;
+  }
+  return nominal;
+}
+
+function enforcePostCompactionBudget(
+  items: AgentInputItem[],
+  protectedUserStartIndex: number,
+  protectedUserCount: number,
+  policy: ResolvedContextCompactionPolicy,
+  modelContext?: ModelContextProfile,
+): AgentInputItem[] {
+  let bounded = items.map((item) => ({ ...item }));
+  const exceeds = (): boolean => {
+    if (policy.inputBudgetTokens !== undefined) {
+      return estimateItemsTokens(bounded, modelContext?.tokenCalibration) > policy.inputBudgetTokens;
+    }
+    return estimateItemsCharacters(bounded) > policy.legacy.maxCharacters;
+  };
+  if (!exceeds()) return bounded;
+
+  // The summary and deterministic ledger occupy the first two slots. Remove
+  // duplicate old user originals oldest-first; their requirements remain in
+  // the structured summary, while the current task remains in the ledger.
+  let removableUsers = Math.max(0, protectedUserCount);
+  while (
+    exceeds() &&
+    removableUsers > 0 &&
+    protectedUserStartIndex >= 0 &&
+    protectedUserStartIndex < bounded.length
+  ) {
+    bounded.splice(protectedUserStartIndex, 1);
+    removableUsers -= 1;
+  }
+
+  if (!exceeds()) return bounded;
+  bounded = bounded.map((item, index) => index < 2 ? item : hardClipToolResultItem(item, 1_200));
+  if (!exceeds()) return bounded;
+
+  // Preserve the complete recent turn structure, but bound verbose assistant
+  // prose and non-latest user messages before considering the current request.
+  const latestUserIndex = findLastUserMessageIndex(bounded);
+  bounded = bounded.map((item, index) => {
+    if (index < 2 || isToolResultItem(item)) return item;
+    const value = item as Record<string, unknown>;
+    if (value.type !== 'message') return hardClipItemPayload(item, 2_000);
+    if (value.role === 'assistant' || (value.role === 'user' && index !== latestUserIndex)) {
+      return clipMessageItem(item, 4_000);
+    }
+    return item;
+  });
+  if (!exceeds()) return bounded;
+
+  // An unusually large current request can exceed the configured window by
+  // itself. Retain both ends and its full-text fingerprint in the ledger.
+  if (latestUserIndex >= 0) bounded[latestUserIndex] = clipMessageItem(bounded[latestUserIndex], 12_000);
+  bounded = bounded.map((item, index) => index < 2 ? item : hardClipItemPayload(item, 1_000));
+  if (!exceeds()) return bounded;
+
+  const ledgerIndex = bounded.findIndex(isContextStateLedgerItem);
+  if (ledgerIndex >= 0) bounded[ledgerIndex] = compactContextStateLedgerItem(bounded[ledgerIndex]);
+  const summaryIndex = bounded.findIndex(isContextSummaryItem);
+  if (summaryIndex >= 0) bounded[summaryIndex] = clipMessageItem(bounded[summaryIndex], 6_000);
+  if (!exceeds()) return bounded;
+
+  // Tool events are now represented in the deterministic ledger. Drop the
+  // oldest raw events until the hard budget is met, preserving conversation
+  // messages and the latest request for as long as possible.
+  for (let index = 2; exceeds() && index < bounded.length;) {
+    if (isToolResultItem(bounded[index]) || isToolCallItem(bounded[index])) {
+      bounded.splice(index, 1);
+      continue;
+    }
+    index += 1;
+  }
+  if (!exceeds()) return bounded;
+
+  // Last-resort budget enforcement keeps the two durable context layers and
+  // the current user request. Older recent prose is already represented by
+  // the summary; remove it oldest-first.
+  let currentUserIndex = findLastUserMessageIndex(bounded);
+  for (let index = 2; exceeds() && index < bounded.length;) {
+    if (index !== currentUserIndex) {
+      bounded.splice(index, 1);
+      if (index < currentUserIndex) currentUserIndex -= 1;
+      continue;
+    }
+    index += 1;
+  }
+  if (!exceeds()) return bounded;
+  if (summaryIndex >= 0 && summaryIndex < bounded.length) {
+    bounded[summaryIndex] = clipMessageItem(bounded[summaryIndex], 2_000);
+  }
+  currentUserIndex = findLastUserMessageIndex(bounded);
+  if (currentUserIndex >= 0) bounded[currentUserIndex] = clipMessageItem(bounded[currentUserIndex], 2_000);
+  return bounded;
+}
+
+function isWithinCompactionBudget(
+  items: AgentInputItem[],
+  policy: ResolvedContextCompactionPolicy,
+  modelContext?: ModelContextProfile,
+): boolean {
+  if (policy.inputBudgetTokens !== undefined) {
+    return estimateItemsTokens(items, modelContext?.tokenCalibration) <= policy.inputBudgetTokens;
+  }
+  return estimateItemsCharacters(items) <= policy.legacy.maxCharacters;
+}
+
+function isToolCallItem(item: AgentInputItem): boolean {
+  const value = item as Record<string, unknown>;
+  const type = typeof value.type === 'string' ? value.type : '';
+  return type === 'function_call' || type === 'tool_call' || type.endsWith('_call');
+}
+
+function hardClipToolResultItem(item: AgentInputItem, maxCharacters: number): AgentInputItem {
+  if (!isToolResultItem(item)) return item;
+  const value = item as Record<string, unknown>;
+  const field = Object.prototype.hasOwnProperty.call(value, 'output')
+    ? 'output'
+    : Object.prototype.hasOwnProperty.call(value, 'content')
+      ? 'content'
+      : undefined;
+  if (!field) return item;
+  const original = messageText(value[field]);
+  if (original.length <= maxCharacters) return item;
+  return {
+    ...value,
+    [field]: `${CONTEXT_TOOL_RESULT_CLIP_MARKER}\n${middleClip(original, maxCharacters)}`,
+  } as unknown as AgentInputItem;
+}
+
+function hardClipItemPayload(item: AgentInputItem, maxCharacters: number): AgentInputItem {
+  if (isToolResultItem(item)) return hardClipToolResultItem(item, maxCharacters);
+  const value = item as Record<string, unknown>;
+  if (value.type === 'message') return clipMessageItem(item, maxCharacters);
+  if (typeof value.arguments === 'string' && value.arguments.length > maxCharacters) {
+    return { ...value, arguments: middleClip(value.arguments, maxCharacters) } as unknown as AgentInputItem;
+  }
+  return item;
+}
+
+function clipMessageItem(item: AgentInputItem, maxCharacters: number): AgentInputItem {
+  const value = item as Record<string, unknown>;
+  const text = messageText(value.content);
+  if (text.length <= maxCharacters) return item;
+  return { ...value, content: middleClip(text, maxCharacters) } as unknown as AgentInputItem;
+}
+
+function findLastUserMessageIndex(items: readonly AgentInputItem[]): number {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    if (isUserMessageItem(items[index])) return index;
+  }
+  return -1;
 }
 
 function compactToolResultText(value: string, maxCharacters = 4_000): string {
