@@ -106,6 +106,7 @@ import {
   EmptyGatewayResponseError,
   GatewayGuardedModel,
   makeLoggingFetch,
+  normalizeChatCompletionsSystemHistory,
   PROMPT_CACHE_DYNAMIC_MARKER,
 } from "./modelGateway";
 import {
@@ -155,6 +156,7 @@ export {
   EmptyGatewayResponseError,
   GatewayGuardedModel,
   makeLoggingFetch,
+  normalizeChatCompletionsSystemHistory,
   createPromptCacheFingerprint,
   formatPromptCacheFingerprint,
   PROMPT_CACHE_DYNAMIC_MARKER,

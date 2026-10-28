@@ -17,6 +17,7 @@ import {
   makeLoggingFetch,
   normalizeWorkflowContract,
   sanitizeChatCompletionRequestBody,
+  normalizeChatCompletionsSystemHistory,
   summarizeNonStreamChatCompletionResponse,
   createPromptCacheFingerprint,
   PROMPT_CACHE_DYNAMIC_MARKER,
@@ -461,6 +462,25 @@ setAgentLogger((line) => diagLines.push(line));
   }
   if (request.input[0].arguments !== '{}') throw new Error('Responses 风格 function_call 参数没有修复');
   console.log('[0] 通用工具参数出站修复:通过 | 修复数 =', sanitized.repaired);
+}
+
+// [0b] Persisted context summaries are system input items, but Chat
+// Completions gateways generally allow only one system message at the front.
+{
+  const normalized = normalizeChatCompletionsSystemHistory({
+    systemInstructions: 'agent instructions',
+    input: [
+      { type: 'message', role: 'system', content: 'compressed context summary' },
+      { type: 'message', role: 'user', content: '在不' },
+    ],
+  });
+  if (normalized.input.some((item) => item.role === 'system')) {
+    throw new Error('Chat Completions 历史仍含第二条 system 消息');
+  }
+  if (normalized.systemInstructions !== 'agent instructions\n\ncompressed context summary') {
+    throw new Error(`Chat Completions system 合并结果错误: ${normalized.systemInstructions}`);
+  }
+  console.log('[0b] Chat Completions system 历史合并:通过');
 }
 
 {

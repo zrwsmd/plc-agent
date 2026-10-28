@@ -45,6 +45,61 @@ export function setAgentLogger(fn: (line: string) => void): void {
 }
 
 /**
+ * Chat Completions gateways commonly accept only one system message and it
+ * must be the first message. The Agents SDK prepends systemInstructions to
+ * the converted input, so a persisted context summary represented as a
+ * system input item would otherwise become a second system message. Merge
+ * those history items into the request-level instructions before conversion.
+ */
+export function normalizeChatCompletionsSystemHistory(request: any): any {
+  if (!request || !Array.isArray(request.input)) return request;
+
+  const systemParts: string[] = [];
+  const input: unknown[] = [];
+  let changed = false;
+  for (const item of request.input) {
+    const value = item as Record<string, unknown> | null;
+    if (!value || value.role !== 'system') {
+      input.push(item);
+      continue;
+    }
+    const text = systemMessageText(value.content);
+    if (text === undefined) {
+      input.push(item);
+      continue;
+    }
+    changed = true;
+    if (text.trim()) systemParts.push(text);
+  }
+  if (!changed) return request;
+
+  const existing = typeof request.systemInstructions === 'string'
+    ? request.systemInstructions.trim()
+    : '';
+  const systemInstructions = [existing, ...systemParts]
+    .filter((part) => part.length > 0)
+    .join('\n\n');
+  return {
+    ...request,
+    input,
+    ...(systemInstructions ? { systemInstructions } : { systemInstructions: undefined }),
+  };
+}
+
+function systemMessageText(content: unknown): string | undefined {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return undefined;
+  const parts = content.map((part) => {
+    if (typeof part === 'string') return part;
+    if (part && typeof part === 'object' && typeof (part as { text?: unknown }).text === 'string') {
+      return (part as { text: string }).text;
+    }
+    return '';
+  }).filter(Boolean);
+  return parts.length ? parts.join('\n') : '';
+}
+
+/**
  * 带"空回复熔断"的 chat_completions 模型。
  *
  * 背景:部分 OpenAI 兼容网关(尤其套壳推理模型)会返回 `finish_reason=stop` 但 content 为空的
@@ -75,6 +130,10 @@ export class GatewayGuardedModel extends OpenAIChatCompletionsModel {
 
   get parallelToolCallsCapability(): GatewayParallelToolCallsSupport {
     return this.parallelToolCallsSupport;
+  }
+
+  override async getResponse(request: any): Promise<any> {
+    return super.getResponse(normalizeChatCompletionsSystemHistory(request));
   }
 
   private async *streamWithCapabilityNegotiation(
@@ -200,6 +259,7 @@ export class GatewayGuardedModel extends OpenAIChatCompletionsModel {
   }
 
   async *getStreamedResponse(request: any): AsyncGenerator<any> {
+    request = normalizeChatCompletionsSystemHistory(request);
     const requiredTool = this.requiredToolOnce;
     this.requiredToolOnce = undefined;
     const forcedRequest = requiredTool
