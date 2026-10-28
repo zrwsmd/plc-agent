@@ -95,6 +95,8 @@ export type ContextSummarizer = (
 export interface ContextManagerOptions {
   /** New unified configuration entry point for context management. */
   modelContext?: ModelContextProfile;
+  /** Explicit user action: compact whenever an older complete turn exists. */
+  force?: boolean;
   /** Legacy direct fields remain supported for callers and older tests. */
   /** @deprecated Use modelContext.compaction.maxInputTokens instead. */
   maxItems?: number;
@@ -173,9 +175,9 @@ export async function ensureContextCompacted(
     inputBudgetTokens !== undefined &&
     beforeTokens !== undefined &&
     beforeTokens > inputBudgetTokens;
-  const shouldCompact = inputBudgetTokens === undefined
+  const shouldCompact = options.force === true || (inputBudgetTokens === undefined
     ? tooManyItems || tooManyCharacters
-    : tooManyTokens;
+    : tooManyTokens);
   if (!shouldCompact) {
     return {
       compacted: false,
@@ -190,7 +192,13 @@ export async function ensureContextCompacted(
     };
   }
 
-  const splitAt = resolveRecentTurnBoundary(items, policy.legacy.recentItems);
+  // Automatic checkpoints preserve the configured recent tail. An explicit
+  // `/compact` keeps the latest complete user turn and summarizes everything
+  // before it, even when the history is still below the automatic threshold.
+  const splitAt = resolveRecentTurnBoundary(
+    items,
+    options.force === true ? 2 : policy.legacy.recentItems,
+  );
   const olderItems = items.slice(0, splitAt);
   const recentItems = items.slice(splitAt);
   if (!olderItems.length) {
@@ -260,7 +268,9 @@ export async function ensureContextCompacted(
         policy,
         modelContext,
       ),
-      reason: inputBudgetTokens === undefined
+      reason: options.force === true
+        ? 'manual_force'
+        : inputBudgetTokens === undefined
         ? [
           tooManyItems ? `items>${maxItems}` : '',
           tooManyCharacters ? `chars>${maxCharacters}` : '',

@@ -63,7 +63,7 @@ export interface ContextCheckpointResult {
 export interface ManagedContextSession {
   readonly session: Session;
   readonly mode: ContextSessionMode;
-  runInitialCheckpoint(): Promise<ContextCheckpointResult>;
+  runInitialCheckpoint(options?: { force?: boolean }): Promise<ContextCheckpointResult>;
   /**
    * Restore the history at the beginning of the current SDK turn. This is
    * intentionally a no-op for the official decorator because its underlying
@@ -91,7 +91,9 @@ class ContextCheckpointSession implements Session {
 
   constructor(
     private readonly inner: RecoverableContextSession,
-    private readonly checkpoint: () => Promise<ContextCompactionResult>,
+    private readonly checkpoint: (
+      options?: Pick<ContextManagerOptions, 'force'>,
+    ) => Promise<ContextCompactionResult>,
     private readonly log: (line: string) => void,
   ) {
     this.turnBoundary = [];
@@ -136,8 +138,10 @@ class ContextCheckpointSession implements Session {
     this.turnBoundary = await this.inner.getItems();
   }
 
-  async runCheckpoint(): Promise<ContextCompactionResult> {
-    return this.checkpoint();
+  async runCheckpoint(
+    options?: Pick<ContextManagerOptions, 'force'>,
+  ): Promise<ContextCompactionResult> {
+    return this.checkpoint(options);
   }
 
   async restoreTurnBoundary(): Promise<void> {
@@ -344,13 +348,13 @@ export async function createManagedContextSession(
       return {
         session: official,
         mode: 'official_responses',
-        async runInitialCheckpoint(): Promise<ContextCheckpointResult> {
+        async runInitialCheckpoint(options): Promise<ContextCheckpointResult> {
           const before = await underlying.getItems();
-          if (!shouldTriggerContextCompaction(before, config.modelContext)) {
+          if (options?.force !== true && !shouldTriggerContextCompaction(before, config.modelContext)) {
             turnBoundary = before.map((item) => ({ ...item }));
             return emptyCheckpointResult(before, 'official_responses');
           }
-          await official.runCompaction();
+          await official.runCompaction(options?.force === true ? { force: true } : undefined);
           const after = await underlying.getItems();
           turnBoundary = after.map((item) => ({ ...item }));
           return {
@@ -377,13 +381,14 @@ export async function createManagedContextSession(
 
   const local = new ContextCheckpointSession(
     underlying,
-    async () => localCompactor(
+    async (checkpointOptions) => localCompactor(
       underlying,
       config,
       {
         modelContext: config.modelContext,
         signal: getSignal(),
         onCompactionState: options.onCompactionState,
+        ...checkpointOptions,
       },
     ),
     log,
@@ -392,8 +397,8 @@ export async function createManagedContextSession(
   return {
     session: local,
     mode: 'local',
-    async runInitialCheckpoint(): Promise<ContextCheckpointResult> {
-      const result = await runLocalCheckpoint(local, 'local');
+    async runInitialCheckpoint(options): Promise<ContextCheckpointResult> {
+      const result = await runLocalCheckpoint(local, 'local', options);
       await local.acceptCurrentHistoryAsTurnBoundary();
       return result;
     },
@@ -406,8 +411,9 @@ export async function createManagedContextSession(
 async function runLocalCheckpoint(
   session: ContextCheckpointSession,
   mode: ContextSessionMode,
+  options?: Pick<ContextManagerOptions, 'force'>,
 ): Promise<ContextCheckpointResult> {
-  const result = await session.runCheckpoint();
+  const result = await session.runCheckpoint(options);
   const after = await session.getItems();
   return {
     compacted: result.compacted,

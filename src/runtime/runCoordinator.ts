@@ -646,7 +646,7 @@ export class RunCoordinator {
           this.compactContextForAgent(session, contextConfig, options),
         log: this.writeLog,
       });
-      const checkpoint = await managed.runInitialCheckpoint();
+      const checkpoint = await managed.runInitialCheckpoint({ force: true });
       return {
         ...checkpoint,
         triggerMode: config.modelContext

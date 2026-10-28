@@ -69,9 +69,10 @@ async function fixture(executeAgent, planTask, team = {}) {
     },
     undefined,
     {
-      compactContext: async (_session, receivedConfig) => {
+      compactContext: async (_session, receivedConfig, options) => {
         compactionCalls += 1;
         if (receivedConfig.apiKey !== 'key') throw new Error('manual compaction did not receive the API key');
+        if (options?.force !== true) throw new Error('manual compaction did not force the checkpoint');
         return {
           compacted: true,
           beforeItems: 20,

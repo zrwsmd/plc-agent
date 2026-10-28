@@ -140,6 +140,52 @@ const baseConfig = {
 }
 
 {
+  const session = new JsonFileSession(path.join(dir, 'official-manual-force-session.json'));
+  await session.addItems([
+    message('user', '较早请求'),
+    message('assistant', '较早回复'),
+    message('user', '最近请求'),
+    message('assistant', '最近回复'),
+  ]);
+  const compactCalls = [];
+  const managed = await createManagedContextSession(
+    session,
+    {
+      ...baseConfig,
+      baseUrl: '',
+      apiFormat: 'responses',
+      model: 'gpt-4o-mini',
+      modelContext: {
+        contextWindowTokens: 128_000,
+        reservedOutputTokens: 4_096,
+        safetyMarginTokens: 1_024,
+        fixedRequestOverheadTokens: 4_096,
+      },
+    },
+    {
+      client: {
+        responses: {
+          compact: async (request) => {
+            compactCalls.push(request);
+            return {
+              output: [{ type: 'compaction', id: 'cmp-manual', encrypted_content: 'compressed' }],
+              usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 },
+            };
+          },
+        },
+      },
+    },
+  );
+  const automatic = await managed.runInitialCheckpoint();
+  assert.equal(automatic.compacted, false);
+  assert.equal(compactCalls.length, 0);
+  const forced = await managed.runInitialCheckpoint({ force: true });
+  assert.equal(forced.compacted, true);
+  assert.equal(compactCalls.length, 1);
+  assert.equal((await session.getItems())[0].type, 'compaction');
+}
+
+{
   const session = new JsonFileSession(path.join(dir, 'fallback-session.json'));
   const logs = [];
   const managed = await createManagedContextSession(session, {

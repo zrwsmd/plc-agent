@@ -390,6 +390,45 @@ try {
   }
 
   {
+    const session = new JsonFileSession(path.join(dir, 'manual-force-session.json'));
+    await session.addItems([
+      { type: 'message', role: 'user', content: '较早的用户需求' },
+      { type: 'message', role: 'assistant', content: '较早的处理结果' },
+      { type: 'message', role: 'user', content: '最近的用户需求' },
+      { type: 'message', role: 'assistant', content: '最近的处理结果' },
+    ]);
+    let called = false;
+    const result = await ensureContextCompacted(session, cfg, {
+      force: true,
+      modelContext: {
+        contextWindowTokens: 128_000,
+        compaction: { maxInputTokens: 100_000, recentItems: 16 },
+      },
+      summarize: async (_config, older, recent) => {
+        called = true;
+        assert.equal(older.length, 2);
+        assert.equal(recent.length, 2);
+        return {
+          summary: '手动压缩摘要',
+          userPreferences: [],
+          durableFacts: [],
+          importantFiles: [],
+          openTasks: [],
+          risks: [],
+        };
+      },
+    });
+    assert.equal(called, true);
+    assert.equal(result.compacted, true);
+    assert.equal(result.reason, 'manual_force');
+    assert.equal(result.triggerMode, 'token_budget');
+    assert.ok(
+      (await session.getItems()).some((item) =>
+        String(item.content ?? '').includes('手动压缩摘要')),
+    );
+  }
+
+  {
     const session = new JsonFileSession(path.join(dir, 'profile-session.json'));
     await session.addItems([
       { type: 'message', role: 'user', content: 'profile old user' },
