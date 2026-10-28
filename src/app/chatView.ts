@@ -1530,7 +1530,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   <div class="composer">
     <div class="composer-box">
-        <textarea id="input" rows="1" placeholder="请输入需求…（输入 /compact 手动压缩上下文）"></textarea>
+      <div id="slash-command-menu" class="slash-command-menu hidden" role="listbox" aria-label="可用命令"></div>
+      <textarea id="input" rows="1" placeholder="请输入需求…（输入 / 查看命令）" aria-controls="slash-command-menu" aria-expanded="false"></textarea>
       <div class="composer-bar">
         <div class="left">
           <div class="permission-menu-wrap">

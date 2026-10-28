@@ -1026,10 +1026,7 @@ export class RunCoordinator {
             this.writeLog('[context] 已启用官方 Responses 会话压缩，完成后由 SDK 自动检查并回写本地 session');
           }
           if (compaction.compacted) {
-            this.writeLog(
-              `[context] 初始历史检查已压缩: items ${compaction.beforeItems}->${compaction.afterItems}, ` +
-                `chars ${compaction.beforeCharacters}->${compaction.afterCharacters}`,
-            );
+            this.writeLog('[context] 初始上下文压缩完成');
             if (compaction.postCompactionBudgetSatisfied === false) {
               this.writeLog('[context] 警告: 压缩后最小上下文仍超过预算，请增大上下文预算或缩短当前请求');
             }
@@ -1068,12 +1065,7 @@ export class RunCoordinator {
           return;
         }
         if (compaction.compacted) {
-          const tokenDetail = compaction.beforeTokens !== undefined
-            ? `, tokens ${compaction.beforeTokens}->${compaction.afterTokens ?? '?'} / budget ${compaction.inputBudgetTokens ?? '?'}`
-            : '';
-          this.writeLog(
-            `[context] 已压缩历史: items ${compaction.beforeItems}->${compaction.afterItems}, chars ${compaction.beforeCharacters}->${compaction.afterCharacters}${tokenDetail}, reason=${compaction.reason ?? 'unknown'}`,
-          );
+          this.writeLog('[context] 上下文压缩完成');
           if (compaction.postCompactionBudgetSatisfied === false) {
             this.writeLog('[context] 警告: 压缩后最小上下文仍超过预算，请增大上下文预算或缩短当前请求');
           }
@@ -2117,10 +2109,7 @@ export class RunCoordinator {
         );
         const initialCompaction = await managedContextSession.runInitialCheckpoint();
         if (initialCompaction.compacted) {
-          this.writeLog(
-            `[context] 执行前历史检查已压缩: items ${initialCompaction.beforeItems}->${initialCompaction.afterItems}, ` +
-              `chars ${initialCompaction.beforeCharacters}->${initialCompaction.afterCharacters}`,
-          );
+          this.writeLog('[context] 执行前上下文压缩完成');
           if (initialCompaction.postCompactionBudgetSatisfied === false) {
             this.writeLog('[context] 警告: 压缩后最小上下文仍超过预算，请增大上下文预算或缩短当前请求');
           }

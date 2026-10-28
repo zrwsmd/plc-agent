@@ -9,6 +9,7 @@ const sessionSearchEl = document.getElementById('session-search');
 const sessionListEl = document.getElementById('session-list');
 const sessionNewBtn = document.getElementById('session-new');
 const inputEl = document.getElementById('input');
+const slashCommandMenuEl = document.getElementById('slash-command-menu');
 const sendBtn = document.getElementById('send');
 const stopBtn = document.getElementById('stop');
 const retryBtn = document.getElementById('retry');
@@ -576,15 +577,28 @@ function clearContextCompactionNote() {
 
 function showContextCompactionState(message, runId, status = 'completed') {
   if (currentRunId && runId && currentRunId !== runId) return;
-  if (!contextCompactionNoteEl || !contextCompactionNoteEl.isConnected) {
-    contextCompactionNoteEl = document.createElement('div');
-    contextCompactionNoteEl.className = 'tool-note context-compaction-note';
-    contextCompactionNoteEl.dataset.runId = runId || '';
-    insertBeforeFinalAnswer(contextCompactionNoteEl, runId);
+  if (status === 'started') {
+    if (!contextCompactionNoteEl || !contextCompactionNoteEl.isConnected) {
+      contextCompactionNoteEl = document.createElement('div');
+      contextCompactionNoteEl.className = 'tool-note context-compaction-note';
+      contextCompactionNoteEl.dataset.runId = runId || '';
+      insertBeforeFinalAnswer(contextCompactionNoteEl, runId);
+    }
+    contextCompactionNoteEl.textContent = String(message || '上下文压缩开始');
+    contextCompactionNoteEl.dataset.status = status;
+    contextCompactionNoteEl.classList.add('active');
+  } else {
+    if (contextCompactionNoteEl?.isConnected) {
+      contextCompactionNoteEl.classList.remove('active');
+      contextCompactionNoteEl = null;
+    }
+    const terminalNote = document.createElement('div');
+    terminalNote.className = 'tool-note context-compaction-note';
+    terminalNote.dataset.runId = runId || '';
+    terminalNote.dataset.status = status;
+    terminalNote.textContent = String(message || '上下文压缩完成');
+    insertBeforeFinalAnswer(terminalNote, runId);
   }
-  contextCompactionNoteEl.textContent = String(message || '上下文压缩完成');
-  contextCompactionNoteEl.dataset.status = status;
-  contextCompactionNoteEl.classList.toggle('active', status === 'started');
   scrollBottom();
 }
 
@@ -2317,6 +2331,88 @@ function scrollBottom() {
   });
 }
 
+const SLASH_COMMANDS = Object.freeze([
+  {
+    name: '/compact',
+    description: '压缩当前会话上下文',
+    execute: () => {
+      clearPauseNotice();
+      inputEl.value = '';
+      autoGrow();
+      hideSlashCommandMenu();
+      showContextCompactionState('上下文压缩开始', undefined, 'started');
+      setRuntimeMode('running');
+      vscode.postMessage({ type: 'compact' });
+    },
+  },
+]);
+
+let slashCommandSelection = 0;
+
+function slashCommandMatches(text) {
+  const value = String(text ?? '');
+  if (!value.startsWith('/') || /[\s\r\n]/u.test(value)) return [];
+  const query = value.toLocaleLowerCase();
+  return SLASH_COMMANDS.filter((command) => command.name.startsWith(query));
+}
+
+function hideSlashCommandMenu() {
+  slashCommandMenuEl?.classList.add('hidden');
+  inputEl?.setAttribute('aria-expanded', 'false');
+  inputEl?.removeAttribute('aria-activedescendant');
+}
+
+function renderSlashCommandMenu() {
+  if (!slashCommandMenuEl || runtimeMode !== 'idle') {
+    hideSlashCommandMenu();
+    return;
+  }
+  const matches = slashCommandMatches(inputEl.value);
+  if (!matches.length) {
+    hideSlashCommandMenu();
+    return;
+  }
+  slashCommandSelection = Math.min(slashCommandSelection, matches.length - 1);
+  slashCommandMenuEl.replaceChildren();
+  matches.forEach((command, index) => {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'slash-command-item';
+    item.classList.toggle('selected', index === slashCommandSelection);
+    item.id = `slash-command-${index}`;
+    item.setAttribute('role', 'option');
+    item.setAttribute('aria-selected', index === slashCommandSelection ? 'true' : 'false');
+    item.innerHTML = `<span class="slash-command-name"></span><span class="slash-command-description"></span>`;
+    item.querySelector('.slash-command-name').textContent = command.name;
+    item.querySelector('.slash-command-description').textContent = command.description;
+    item.addEventListener('mousedown', (event) => event.preventDefault());
+    item.addEventListener('click', () => executeSlashCommand(command));
+    slashCommandMenuEl.appendChild(item);
+  });
+  slashCommandMenuEl.classList.remove('hidden');
+  inputEl.setAttribute('aria-expanded', 'true');
+  inputEl.setAttribute('aria-activedescendant', `slash-command-${slashCommandSelection}`);
+}
+
+function executeSlashCommand(command) {
+  if (runtimeMode !== 'idle' || !command) return;
+  command.execute();
+}
+
+function chooseSlashCommand(shouldExecute) {
+  const matches = slashCommandMatches(inputEl.value);
+  const command = matches[slashCommandSelection];
+  if (!command) return false;
+  inputEl.value = command.name;
+  inputEl.setSelectionRange(inputEl.value.length, inputEl.value.length);
+  if (shouldExecute) executeSlashCommand(command);
+  else {
+    hideSlashCommandMenu();
+    autoGrow();
+  }
+  return true;
+}
+
 function isRetryRequest(text) {
   return /^(?:重试|重试本轮|重新尝试|再次尝试|retry)[。！!,.，、\s]*$/iu.test(String(text ?? '').trim());
 }
@@ -2338,13 +2434,11 @@ function send() {
     vscode.postMessage({ type: 'retry' });
     return;
   }
-  if (isCompactRequest(text)) {
-    clearPauseNotice();
-    inputEl.value = '';
-    autoGrow();
-    showContextCompactionState('上下文压缩中', undefined, 'started');
-    setRuntimeMode('running');
-    vscode.postMessage({ type: 'compact' });
+  const exactSlashCommand = SLASH_COMMANDS.find((command) =>
+    command.name.toLocaleLowerCase() === text.toLocaleLowerCase(),
+  );
+  if (exactSlashCommand) {
+    executeSlashCommand(exactSlashCommand);
     return;
   }
   clearPauseNotice();
@@ -2374,12 +2468,51 @@ continueBtn.addEventListener('click', () => {
   vscode.postMessage({ type: 'continue' });
 });
 inputEl.addEventListener('keydown', (e) => {
+  const commandMenuVisible = slashCommandMenuEl && !slashCommandMenuEl.classList.contains('hidden');
+  if (commandMenuVisible && e.key === 'ArrowDown') {
+    e.preventDefault();
+    const matches = slashCommandMatches(inputEl.value);
+    slashCommandSelection = (slashCommandSelection + 1) % matches.length;
+    renderSlashCommandMenu();
+    return;
+  }
+  if (commandMenuVisible && e.key === 'ArrowUp') {
+    e.preventDefault();
+    const matches = slashCommandMatches(inputEl.value);
+    slashCommandSelection = (slashCommandSelection - 1 + matches.length) % matches.length;
+    renderSlashCommandMenu();
+    return;
+  }
+  if (commandMenuVisible && e.key === 'Tab') {
+    e.preventDefault();
+    chooseSlashCommand(false);
+    return;
+  }
+  if (commandMenuVisible && e.key === 'Escape') {
+    e.preventDefault();
+    hideSlashCommandMenu();
+    return;
+  }
+  if (commandMenuVisible && e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    chooseSlashCommand(true);
+    return;
+  }
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
     send();
   }
 });
-inputEl.addEventListener('input', autoGrow);
+inputEl.addEventListener('input', () => {
+  slashCommandSelection = 0;
+  autoGrow();
+  renderSlashCommandMenu();
+});
+inputEl.addEventListener('focus', renderSlashCommandMenu);
+document.addEventListener('mousedown', (event) => {
+  if (event.target === inputEl || slashCommandMenuEl?.contains(event.target)) return;
+  hideSlashCommandMenu();
+});
 
 function autoGrow() {
   inputEl.style.height = 'auto';

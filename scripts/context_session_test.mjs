@@ -73,7 +73,7 @@ const baseConfig = {
     (await session.getItems()).map((item) => item.content),
     ['[summary] 已压缩', '本轮工具回执'],
   );
-  assert.equal(logs.some((line) => line.includes('单轮中途检查已压缩历史')), true);
+  assert.equal(logs.some((line) => line.includes('单轮中途上下文压缩完成')), true);
 
   await managed.restoreTurnBoundary();
   assert.deepEqual(

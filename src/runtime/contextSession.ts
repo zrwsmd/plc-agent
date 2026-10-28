@@ -163,10 +163,7 @@ class ContextCheckpointSession implements Session {
       try {
         const result = await this.checkpoint();
         if (result.compacted) {
-          this.log(
-            `[context] 单轮中途检查已压缩历史: items ${result.beforeItems}->${result.afterItems}, ` +
-              `chars ${result.beforeCharacters}->${result.afterCharacters}`,
-          );
+          this.log('[context] 单轮中途上下文压缩完成');
         } else if (result.error) {
           this.log(`[context] 单轮中途检查失败，保留当前历史继续: ${result.error}`);
         }
