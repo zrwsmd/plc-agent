@@ -285,6 +285,47 @@ body.settings-open { overflow: hidden; }
   max-width: 88%;
   white-space: pre-wrap;
 }
+.msg.user .msg-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 4px;
+  margin-top: 1px;
+  padding-right: 2px;
+}
+.msg.user .msg-copy {
+  width: 22px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1;
+  opacity: 0.6;
+  user-select: none;
+  transition: opacity 0.12s ease, color 0.12s ease;
+}
+.msg.user:hover .msg-copy,
+.msg.user .msg-copy:focus-visible {
+  opacity: 1;
+}
+.msg.user .msg-copy:hover {
+  border-color: color-mix(in srgb, var(--border) 90%, var(--accent));
+  background: color-mix(in srgb, var(--box) 78%, transparent);
+  color: var(--fg);
+}
+.msg.user .msg-copy.copied {
+  color: var(--vscode-testing-iconPassed, #4caf7d);
+  opacity: 1;
+}
+.msg.user .msg-copy.failed {
+  color: var(--vscode-errorForeground, #f66);
+  opacity: 1;
+}
 .msg.agent .bubble {
   display: block;
   background: transparent;

@@ -405,9 +405,51 @@ function addMessage(kind, text) {
   bubble.className = 'bubble';
   bubble.textContent = text;
   wrap.appendChild(bubble);
+  if (kind === 'user') wrap.appendChild(createUserMessageActions(bubble));
   messagesEl.appendChild(wrap);
   scrollBottom();
   return bubble;
+}
+
+// 用户气泡下面的复制按钮。文本在点下去那一刻从气泡里读，不另存副本：
+// runAttached 这类路径会往同一个气泡里补内容，存副本会和屏幕上的字对不上。
+function createUserMessageActions(bubble) {
+  const actions = document.createElement('div');
+  actions.className = 'msg-actions';
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'msg-copy';
+  button.textContent = '⧉';
+  button.title = '复制这条消息';
+  button.setAttribute('aria-label', '复制这条消息');
+  button.addEventListener('click', async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (button.dataset.copying === '1') return;
+    const text = bubble.textContent || '';
+    if (!text.trim()) return;
+    button.dataset.copying = '1';
+    try {
+      await copyTextToClipboard(text);
+      button.textContent = '✓';
+      button.classList.add('copied');
+      setTimeout(() => {
+        button.textContent = '⧉';
+        button.classList.remove('copied');
+      }, 1200);
+    } catch (_error) {
+      button.textContent = '!';
+      button.classList.add('failed');
+      setTimeout(() => {
+        button.textContent = '⧉';
+        button.classList.remove('failed');
+      }, 1200);
+    } finally {
+      delete button.dataset.copying;
+    }
+  });
+  actions.appendChild(button);
+  return actions;
 }
 
 function rememberFinalAnswerAnchor(runId, bubble) {
