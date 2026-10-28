@@ -1891,6 +1891,33 @@ function getMessageSelectionText() {
   return text;
 }
 
+// Opening the native WebView context menu can temporarily clear the DOM
+// selection before Chromium dispatches its Copy command. Keep the selection
+// captured at context-menu time as a short-lived fallback for that command.
+let contextMenuSelectionText = '';
+let contextMenuSelectionTimer = null;
+
+function rememberContextMenuSelection() {
+  const text = getMessageSelectionText();
+  if (!text) return;
+  contextMenuSelectionText = text;
+  if (contextMenuSelectionTimer) clearTimeout(contextMenuSelectionTimer);
+  contextMenuSelectionTimer = setTimeout(() => {
+    contextMenuSelectionText = '';
+    contextMenuSelectionTimer = null;
+  }, 10000);
+}
+
+function takeContextMenuSelection() {
+  const text = contextMenuSelectionText;
+  contextMenuSelectionText = '';
+  if (contextMenuSelectionTimer) {
+    clearTimeout(contextMenuSelectionTimer);
+    contextMenuSelectionTimer = null;
+  }
+  return text;
+}
+
 function requestMessageSelectionCopy(event, text) {
   if (!text) return;
 
@@ -1908,8 +1935,19 @@ function requestMessageSelectionCopy(event, text) {
   });
 }
 
+// Capture before the native menu has a chance to move focus or collapse the
+// selection. Do not prevent the event: the WebView's native menu remains in
+// charge of presenting and executing Copy.
+document.addEventListener('contextmenu', (event) => {
+  if (messagesEl?.contains(event.target)) rememberContextMenuSelection();
+  else takeContextMenuSelection();
+}, true);
+
 document.addEventListener('copy', (event) => {
-  requestMessageSelectionCopy(event, getMessageSelectionText());
+  const currentSelection = getMessageSelectionText();
+  const text = currentSelection || takeContextMenuSelection();
+  if (currentSelection) takeContextMenuSelection();
+  requestMessageSelectionCopy(event, text);
 });
 
 // Some Webview versions handle Ctrl/C before dispatching a usable copy event.
