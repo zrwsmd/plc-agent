@@ -406,12 +406,46 @@ function formatSessionTime(value) {
 
 // ---------- 消息渲染 ----------
 
-function addMessage(kind, text) {
+function renderUserMessageContent(bubble, text, images = []) {
+  bubble.replaceChildren();
+  const displayImages = Array.isArray(images)
+    ? images.filter((image) => image && typeof image.dataUrl === 'string' && image.dataUrl.startsWith('data:image/'))
+    : [];
+  if (displayImages.length) {
+    const previews = document.createElement('div');
+    previews.className = 'user-attachment-previews';
+    for (const image of displayImages) {
+      const preview = document.createElement('img');
+      preview.className = 'user-attachment-preview';
+      preview.src = image.dataUrl;
+      preview.alt = typeof image.name === 'string' ? image.name : '附件图片';
+      preview.title = preview.alt;
+      preview.loading = 'lazy';
+      previews.appendChild(preview);
+    }
+    bubble.appendChild(previews);
+  }
+  const rawText = String(text ?? '');
+  // The host adds a private marker for image-only prompts so the model can
+  // identify the attachment. It is redundant once the thumbnail is visible.
+  const visibleText = displayImages.length && /^(?:\[附件图片:\s*[^\]]+\]\s*)+$/u.test(rawText.trim())
+    ? ''
+    : rawText;
+  if (visibleText) {
+    const textNode = document.createElement('div');
+    textNode.className = 'user-message-text';
+    textNode.textContent = visibleText;
+    bubble.appendChild(textNode);
+  }
+}
+
+function addMessage(kind, text, images = []) {
   const wrap = document.createElement('div');
   wrap.className = `msg ${kind}`;
   const bubble = document.createElement('div');
   bubble.className = 'bubble';
-  bubble.textContent = text;
+  if (kind === 'user') renderUserMessageContent(bubble, text, images);
+  else bubble.textContent = text;
   wrap.appendChild(bubble);
   if (kind === 'user') wrap.appendChild(createUserMessageActions(bubble));
   messagesEl.appendChild(wrap);
@@ -523,14 +557,14 @@ function insertBeforeFinalAnswer(node, runId) {
   }
 }
 
-function beginUserTurn(text, runId, reusePendingLocal = false) {
+function beginUserTurn(text, runId, reusePendingLocal = false, images = []) {
   const displayText = String(text ?? '');
   const hint = messagesEl.querySelector('.hint');
   if (hint) hint.remove();
   clearPreflightNote();
   clearContextCompactionNote();
   const reuseExisting = reusePendingLocal && pendingLocalUserText === displayText && agentBubble;
-  if (!reuseExisting) addMessage('user', displayText);
+  if (!reuseExisting) addMessage('user', displayText, images);
   currentRunId = runId || null;
   if (currentRunId) resetThinkingTracking(currentRunId);
   agentText = '';
@@ -2480,7 +2514,7 @@ function send() {
   pendingLocalUserText = messageText;
   awaitingRunAck = true;
   stopRequestedBeforeRunAck = false;
-  beginUserTurn(messageText);
+  beginUserTurn(messageText, undefined, false, images);
   vscode.postMessage({ type: 'send', text: messageText, images });
 }
 
