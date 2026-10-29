@@ -8,7 +8,7 @@
  * 落盘位置:工作区 storage 目录/sessions/<session-id>/session.json；无工作区时
  * 回退到扩展 globalStorage。跨窗口、跨重启有效,卸载插件时 VSCode 会一并清理。
  */
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { AgentInputItem, Session } from '@openai/agents';
@@ -17,6 +17,30 @@ import {
   stripHistoricalContextMarker,
 } from './agentHistory';
 import { isContextStateLedgerItem } from './contextStateLedger';
+import type { SupportedImageMimeType, UserImageAttachment } from './multimodal';
+
+interface DisplayImageReference {
+  type: 'input_image_ref';
+  file: string;
+  name: string;
+  mimeType: SupportedImageMimeType;
+}
+
+export interface ChatHistoryMessage {
+  role: 'user' | 'agent';
+  text: string;
+  images?: UserImageAttachment[];
+}
+
+const DISPLAY_IMAGE_REF_TYPE = 'input_image_ref';
+const IMAGE_ATTACHMENT_MARKER = /^\[附件图片:\s*([^\]]+)\]$/u;
+const IMAGE_DATA_URL = /^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/=\s]+)$/u;
+const IMAGE_FILE = /^[a-f0-9]{64}\.(?:png|jpg|webp)$/u;
+const IMAGE_EXTENSIONS: Record<SupportedImageMimeType, string> = {
+  'image/png': '.png',
+  'image/jpeg': '.jpg',
+  'image/webp': '.webp',
+};
 
 export class JsonFileSession implements Session {
   private items: AgentInputItem[] = [];
@@ -36,6 +60,10 @@ export class JsonFileSession implements Session {
   private loaded = false;
 
   constructor(private readonly filePath: string) {}
+
+  private attachmentsDir(): string {
+    return path.join(path.dirname(this.filePath), 'attachments');
+  }
 
   private queueKey(): string {
     const resolved = path.resolve(this.filePath);
@@ -57,13 +85,18 @@ export class JsonFileSession implements Session {
       if (!Array.isArray(data.items)) throw new Error('invalid session items');
       this.sessionId = typeof data.sessionId === 'string' ? data.sessionId : randomUUID();
       this.items = sanitizeAssistantHistoryItems(data.items as AgentInputItem[]);
-      const rawDisplayItems = Array.isArray(data.displayItems) ? data.displayItems : data.items;
-      this.displayItems = sanitizeAssistantHistoryItems(rawDisplayItems as AgentInputItem[])
-        .map(projectDisplayHistoryItem)
-        .filter(isDisplayHistoryItem);
+      const rawDisplayItems = sanitizeAssistantHistoryItems(
+        (Array.isArray(data.displayItems) ? data.displayItems : data.items) as AgentInputItem[],
+      ).filter(isDisplayHistoryItem);
+      this.displayItems = [];
+      for (const item of rawDisplayItems) {
+        this.displayItems.push(await this.projectDisplayHistoryItem(item));
+      }
+      await this.restoreDisplayImagesFromModelHistory();
       if (
         JSON.stringify(this.items) !== JSON.stringify(data.items) ||
-        !Array.isArray(data.displayItems)
+        !Array.isArray(data.displayItems) ||
+        JSON.stringify(this.displayItems) !== JSON.stringify(rawDisplayItems)
       ) {
         await this.persistSnapshot();
       }
@@ -104,6 +137,144 @@ export class JsonFileSession implements Session {
     })();
   }
 
+  private async projectDisplayHistoryItem(item: AgentInputItem): Promise<AgentInputItem> {
+    const value = item as Record<string, unknown>;
+    if (value.type !== 'message' || value.role !== 'user' || !Array.isArray(value.content)) {
+      return item;
+    }
+    let changed = false;
+    let pendingName = '';
+    const content: unknown[] = [];
+    for (const part of value.content) {
+      if (!part || typeof part !== 'object') {
+        content.push(part);
+        continue;
+      }
+      const record = part as Record<string, unknown>;
+      if (record.type === 'input_text' && typeof record.text === 'string') {
+        pendingName = IMAGE_ATTACHMENT_MARKER.exec(record.text.trim())?.[1]?.trim() ?? '';
+        content.push(part);
+        continue;
+      }
+      if (isDisplayImageReference(record)) {
+        content.push(record);
+        pendingName = '';
+        continue;
+      }
+      if (record.type !== 'input_image' || typeof record.image !== 'string') {
+        content.push(part);
+        continue;
+      }
+      const reference = await this.persistDisplayImage(record.image, pendingName || imageName(record));
+      content.push(reference ?? part);
+      changed = changed || Boolean(reference);
+      pendingName = '';
+    }
+    return changed ? { ...value, content } as unknown as AgentInputItem : item;
+  }
+
+  private async persistDisplayImage(
+    dataUrl: string,
+    requestedName: string,
+  ): Promise<DisplayImageReference | undefined> {
+    const match = IMAGE_DATA_URL.exec(dataUrl.trim());
+    if (!match) return undefined;
+    const mimeType = match[1] as SupportedImageMimeType;
+    const bytes = Buffer.from(match[2].replace(/\s+/gu, ''), 'base64');
+    if (!bytes.length) return undefined;
+    const hash = createHash('sha256').update(bytes).digest('hex');
+    const file = `${hash}${IMAGE_EXTENSIONS[mimeType]}`;
+    const target = path.join(this.attachmentsDir(), file);
+    await fs.mkdir(this.attachmentsDir(), { recursive: true });
+    try {
+      await fs.writeFile(target, bytes, { flag: 'wx' });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') return undefined;
+    }
+    return {
+      type: DISPLAY_IMAGE_REF_TYPE,
+      file,
+      name: sanitizeImageName(requestedName, file),
+      mimeType,
+    };
+  }
+
+  private async restoreDisplayImagesFromModelHistory(): Promise<void> {
+    const candidates = new Map<string, AgentInputItem[]>();
+    for (const item of this.items) {
+      if (!isUserMessageItem(item) || !hasInlineImage(item)) continue;
+      const signature = displayMessageSignature(item);
+      if (!signature) continue;
+      const projected = await this.projectDisplayHistoryItem(item);
+      if (!hasDisplayImage(projected)) continue;
+      const list = candidates.get(signature) ?? [];
+      list.push(projected);
+      candidates.set(signature, list);
+    }
+    this.displayItems = this.displayItems.map((item) => {
+      if (!isUserMessageItem(item) || hasDisplayImage(item)) return item;
+      const signature = displayMessageSignature(item);
+      if (!signature) return item;
+      return candidates.get(signature)?.shift() ?? item;
+    });
+  }
+
+  private async hydrateDisplayHistoryItem(item: AgentInputItem): Promise<AgentInputItem> {
+    const value = item as Record<string, unknown>;
+    if (value.type !== 'message' || value.role !== 'user' || !Array.isArray(value.content)) {
+      return { ...item };
+    }
+    let changed = false;
+    const content: unknown[] = [];
+    for (const part of value.content) {
+      if (!isDisplayImageReference(part)) {
+        content.push(part);
+        continue;
+      }
+      const file = safeAttachmentFile(part.file);
+      if (!file) {
+        content.push(part);
+        continue;
+      }
+      try {
+        const bytes = await fs.readFile(path.join(this.attachmentsDir(), file));
+        content.push({
+          type: 'input_image',
+          image: `data:${part.mimeType};base64,${bytes.toString('base64')}`,
+          name: part.name,
+          mimeType: part.mimeType,
+        });
+        changed = true;
+      } catch {
+        content.push(part);
+      }
+    }
+    return changed ? { ...value, content } as unknown as AgentInputItem : { ...item };
+  }
+
+  private async pruneDisplayAttachments(): Promise<void> {
+    const referenced = new Set<string>();
+    for (const item of this.displayItems) {
+      const content = (item as { content?: unknown }).content;
+      if (!Array.isArray(content)) continue;
+      for (const part of content) {
+        if (isDisplayImageReference(part)) referenced.add(part.file);
+      }
+    }
+    let files: string[];
+    try {
+      files = await fs.readdir(this.attachmentsDir());
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw error;
+    }
+    await Promise.all(files.map(async (file) => {
+      if (!referenced.has(file) && safeAttachmentFile(file)) {
+        await fs.rm(path.join(this.attachmentsDir(), file), { force: true });
+      }
+    }));
+  }
+
   /** Serialize reads and writes against the same on-disk session document. */
   private enqueue<T>(operation: () => Promise<T> | T): Promise<T> {
     const key = this.queueKey();
@@ -141,7 +312,9 @@ export class JsonFileSession implements Session {
       await this.loadFromDisk(true);
       const sanitized = sanitizeAssistantHistoryItems(items);
       this.items.push(...sanitized);
-      this.displayItems.push(...sanitized.filter(isDisplayHistoryItem).map(projectDisplayHistoryItem));
+      for (const item of sanitized.filter(isDisplayHistoryItem)) {
+        this.displayItems.push(await this.projectDisplayHistoryItem(item));
+      }
       await this.persistSnapshot();
     });
   }
@@ -161,6 +334,7 @@ export class JsonFileSession implements Session {
           }
         }
       }
+      await this.pruneDisplayAttachments();
       await this.persistSnapshot();
       return last;
     });
@@ -172,6 +346,7 @@ export class JsonFileSession implements Session {
       this.items = [];
       this.displayItems = [];
       this.sessionId = randomUUID();
+      await fs.rm(this.attachmentsDir(), { recursive: true, force: true });
       await this.persistSnapshot();
     });
   }
@@ -189,7 +364,7 @@ export class JsonFileSession implements Session {
   async getDisplayItems(): Promise<AgentInputItem[]> {
     return this.enqueue(async () => {
       await this.loadFromDisk(true);
-      return this.displayItems.map((item) => ({ ...item }));
+      return Promise.all(this.displayItems.map((item) => this.hydrateDisplayHistoryItem(item)));
     });
   }
 
@@ -215,6 +390,7 @@ export class JsonFileSession implements Session {
           }
         }
       }
+      await this.pruneDisplayAttachments();
       await this.persistSnapshot();
     });
   }
@@ -225,18 +401,42 @@ function isDisplayHistoryItem(item: AgentInputItem): boolean {
   return value.type === 'message' && (value.role === 'user' || value.role === 'assistant');
 }
 
-/** Keep the UI replay copy small while preserving the full image for the model. */
-function projectDisplayHistoryItem(item: AgentInputItem): AgentInputItem {
-  const value = item as Record<string, unknown>;
-  if (value.type !== 'message' || value.role !== 'user' || !Array.isArray(value.content)) {
-    return item;
-  }
-  const content = value.content.filter((part) => {
-    return !part || typeof part !== 'object' || (part as Record<string, unknown>).type !== 'input_image';
-  });
-  return content.length === value.content.length
-    ? item
-    : { ...value, content } as unknown as AgentInputItem;
+function isDisplayImageReference(value: unknown): value is DisplayImageReference {
+  if (!value || typeof value !== 'object') return false;
+  const record = value as Record<string, unknown>;
+  return record.type === DISPLAY_IMAGE_REF_TYPE &&
+    typeof record.file === 'string' &&
+    Boolean(safeAttachmentFile(record.file)) &&
+    typeof record.name === 'string' &&
+    (record.mimeType === 'image/png' || record.mimeType === 'image/jpeg' || record.mimeType === 'image/webp');
+}
+
+function safeAttachmentFile(value: string): string | undefined {
+  return IMAGE_FILE.test(value) && path.basename(value) === value ? value : undefined;
+}
+
+function sanitizeImageName(value: string, fallback: string): string {
+  const name = String(value ?? '').replace(/[\u0000-\u001f]/gu, '').trim().slice(0, 180);
+  return name || fallback;
+}
+
+function imageName(value: Record<string, unknown>): string {
+  return typeof value.name === 'string' ? value.name : '';
+}
+
+function hasInlineImage(item: AgentInputItem): boolean {
+  const content = (item as { content?: unknown }).content;
+  return Array.isArray(content) && content.some((part) =>
+    part && typeof part === 'object' &&
+    (part as Record<string, unknown>).type === 'input_image' &&
+    typeof (part as Record<string, unknown>).image === 'string');
+}
+
+function hasDisplayImage(item: AgentInputItem): boolean {
+  const content = (item as { content?: unknown }).content;
+  return Array.isArray(content) && content.some((part) =>
+    isDisplayImageReference(part) ||
+    (part && typeof part === 'object' && (part as Record<string, unknown>).type === 'input_image'));
 }
 
 function isUserMessageItem(item: AgentInputItem): boolean {
@@ -259,27 +459,72 @@ function displayMessageText(content: unknown): string {
     .join('');
 }
 
-/** 从会话条目里抽取可展示的 user/assistant 文本(用于面板重开时回放历史) */
-export function extractChatMessages(items: AgentInputItem[]): { role: 'user' | 'agent'; text: string }[] {
-  const out: { role: 'user' | 'agent'; text: string }[] = [];
+/** 从会话条目里抽取可展示的文字与图片(用于面板重开时回放历史) */
+export function extractChatMessages(items: AgentInputItem[]): ChatHistoryMessage[] {
+  const out: ChatHistoryMessage[] = [];
   for (const item of items) {
     const it = item as { type?: string; role?: string; content?: unknown };
     if (isContextStateLedgerItem(item)) continue;
     if (it.type !== 'message' || (it.role !== 'user' && it.role !== 'assistant')) continue;
-    let text = '';
-    if (typeof it.content === 'string') {
-      text = it.content;
-    } else if (Array.isArray(it.content)) {
-      text = it.content
-        .map((p) => (typeof p === 'string' ? p : (p as { text?: string })?.text ?? ''))
-        .join('');
-    }
+    const extracted = extractMessageContent(it.content);
+    let text = extracted.text;
     if (it.role === 'assistant') {
       text = stripHistoricalContextMarker(projectAssistantHistoryText(text));
     }
-    if (text.trim()) out.push({ role: it.role === 'user' ? 'user' : 'agent', text });
+    if (text.trim() || extracted.images.length) {
+      out.push({
+        role: it.role === 'user' ? 'user' : 'agent',
+        text,
+        ...(extracted.images.length ? { images: extracted.images } : {}),
+      });
+    }
   }
   return out;
+}
+
+function extractMessageContent(content: unknown): { text: string; images: UserImageAttachment[] } {
+  if (typeof content === 'string') return { text: content, images: [] };
+  if (!Array.isArray(content)) return { text: '', images: [] };
+  const text: string[] = [];
+  const pendingMarkers: Array<{ raw: string; name: string }> = [];
+  const images: UserImageAttachment[] = [];
+  const flushMarkers = () => {
+    while (pendingMarkers.length) text.push(pendingMarkers.shift()!.raw);
+  };
+  for (const part of content) {
+    if (typeof part === 'string') {
+      flushMarkers();
+      text.push(part);
+      continue;
+    }
+    if (!part || typeof part !== 'object') continue;
+    const record = part as Record<string, unknown>;
+    if (typeof record.text === 'string') {
+      const marker = IMAGE_ATTACHMENT_MARKER.exec(record.text.trim());
+      if (marker) pendingMarkers.push({ raw: record.text, name: marker[1].trim() });
+      else {
+        flushMarkers();
+        text.push(record.text);
+      }
+      continue;
+    }
+    if (record.type === 'input_image' && typeof record.image === 'string') {
+      const data = IMAGE_DATA_URL.exec(record.image.trim());
+      if (data) {
+        const marker = pendingMarkers.shift();
+        const mimeType = data[1] as SupportedImageMimeType;
+        images.push({
+          name: sanitizeImageName(imageName(record) || marker?.name || '', marker?.name || '附件图片'),
+          mimeType,
+          dataUrl: record.image,
+        });
+        continue;
+      }
+    }
+    flushMarkers();
+  }
+  flushMarkers();
+  return { text: text.join(''), images };
 }
 
 function projectAssistantHistoryText(text: string): string {

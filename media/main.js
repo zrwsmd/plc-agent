@@ -4336,7 +4336,7 @@ function flushPendingAgentText() {
 
 function renderHistoryMessage(m) {
   if (m.role === 'user') {
-    addMessage('user', m.text);
+    addMessage('user', m.text, Array.isArray(m.images) ? m.images : []);
     return;
   }
   const text = sanitizeAssistantText(m.text);
@@ -4386,10 +4386,13 @@ function groupHistoryEvents(events) {
 }
 
 function takeNextHistoryEventGroup(groups, userText, consumed) {
-  const normalized = String(userText ?? '').trim();
+  const normalize = (value) => String(value ?? '')
+    .replace(/\[附件图片:\s*[^\]]+\]/gu, '')
+    .trim();
+  const normalized = normalize(userText);
   const index = groups.findIndex((group, i) =>
     !consumed.has(i) &&
-    group.userText.trim() === normalized &&
+    normalize(group.userText) === normalized &&
     group.events.length > 0);
   if (index < 0) return undefined;
   consumed.add(index);
