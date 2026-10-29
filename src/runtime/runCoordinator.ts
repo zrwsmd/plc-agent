@@ -338,6 +338,8 @@ export interface RunCoordinatorDependencies {
 
 export interface RecoverableSession extends Session {
   getItems(limit?: number): Promise<AgentInputItem[]>;
+  /** Optional uncompressed copy used only when restoring the chat UI. */
+  getDisplayItems?(): Promise<AgentInputItem[]>;
   clearSession(): Promise<void>;
   truncate(length: number): Promise<void>;
   replaceItems(items: AgentInputItem[]): Promise<void>;
@@ -3150,7 +3152,10 @@ export class RunCoordinator {
   }
 
   private async replayHistory(generation = this.clearGeneration): Promise<void> {
-    const messages = extractChatMessages(await this.session.getItems());
+    const displayItems = this.session.getDisplayItems
+      ? await this.session.getDisplayItems()
+      : await this.session.getItems();
+    const messages = extractChatMessages(displayItems);
     const run = await this.store.getActive() ?? await this.store.getLast();
     const storedEvents = await this.store.getHistoryEvents();
     const events = mergeReplayableHistoryEvents(

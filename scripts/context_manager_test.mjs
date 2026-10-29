@@ -232,6 +232,21 @@ try {
       'recent user',
       'recent assistant',
     ]);
+
+    // Compaction changes only the model-facing history. Reopening the same
+    // file must still replay every complete user/assistant turn in the UI.
+    const display = extractChatMessages(await session.getDisplayItems());
+    assert.deepEqual(display.map((message) => message.text), [
+      'old user 1',
+      'old assistant 1',
+      'old user 2',
+      'old assistant 2',
+      'recent user',
+      'recent assistant',
+    ]);
+    const reopened = new JsonFileSession(path.join(dir, 'session.json'));
+    const reopenedDisplay = extractChatMessages(await reopened.getDisplayItems());
+    assert.deepEqual(reopenedDisplay, display);
   }
 
   {
@@ -285,6 +300,28 @@ try {
     const compacted = await session.getItems();
     assert.equal(compacted.filter((item) => String(item.content ?? '').includes(CONTEXT_SUMMARY_MARKER)).length, 1);
     assert.ok(compacted.some((item) => item.content === '必须保留这个用户约束：不要修改配置文件'));
+  }
+
+  {
+    const session = new JsonFileSession(path.join(dir, 'display-rollback-session.json'));
+    await session.addItems([
+      { type: 'message', role: 'user', content: '旧请求' },
+      { type: 'message', role: 'assistant', content: '旧回复' },
+    ]);
+    // Model history can be shorter than the display copy after compaction.
+    await session.replaceItems([
+      { type: 'message', role: 'system', content: '[summary] 旧请求已压缩' },
+      { type: 'message', role: 'user', content: '旧请求' },
+    ]);
+    await session.addItems([
+      { type: 'message', role: 'user', content: '失败的新请求' },
+      { type: 'message', role: 'assistant', content: '失败的半成品' },
+    ]);
+    await session.truncate(2);
+    assert.deepEqual(
+      extractChatMessages(await session.getDisplayItems()).map((message) => message.text),
+      ['旧请求', '旧回复'],
+    );
   }
 
   {

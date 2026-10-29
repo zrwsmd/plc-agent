@@ -5,8 +5,8 @@
  * VSCode 插件分发要按平台重新编译,代价不值;对话规模用 JSON 文件足够,
  * 以后真要大数据量再换后端,接口不变。
  *
- * 落盘位置:扩展 globalStorage 目录/session.json —— 跨窗口、跨重启有效,
- * 卸载插件时 VSCode 会一并清理。
+ * 落盘位置:工作区 storage 目录/sessions/<session-id>/session.json；无工作区时
+ * 回退到扩展 globalStorage。跨窗口、跨重启有效,卸载插件时 VSCode 会一并清理。
  */
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
@@ -20,6 +20,12 @@ import { isContextStateLedgerItem } from './contextStateLedger';
 
 export class JsonFileSession implements Session {
   private items: AgentInputItem[] = [];
+  /**
+   * UI replay history is intentionally separate from the model history.
+   * Context compaction is allowed to replace `items`, but reopening a chat
+   * must still show the complete user/assistant conversation.
+   */
+  private displayItems: AgentInputItem[] = [];
   private sessionId = '';
   /**
    * All operations for the same file share one queue, including operations
@@ -43,6 +49,7 @@ export class JsonFileSession implements Session {
         schemaVersion?: number;
         sessionId?: string;
         items?: unknown;
+        displayItems?: unknown;
       };
       if (!data || typeof data !== 'object' || (data.schemaVersion !== undefined && data.schemaVersion !== 1)) {
         throw new Error('unsupported session schema');
@@ -50,7 +57,13 @@ export class JsonFileSession implements Session {
       if (!Array.isArray(data.items)) throw new Error('invalid session items');
       this.sessionId = typeof data.sessionId === 'string' ? data.sessionId : randomUUID();
       this.items = sanitizeAssistantHistoryItems(data.items as AgentInputItem[]);
-      if (JSON.stringify(this.items) !== JSON.stringify(data.items)) {
+      const rawDisplayItems = Array.isArray(data.displayItems) ? data.displayItems : data.items;
+      this.displayItems = sanitizeAssistantHistoryItems(rawDisplayItems as AgentInputItem[])
+        .filter(isDisplayHistoryItem);
+      if (
+        JSON.stringify(this.items) !== JSON.stringify(data.items) ||
+        !Array.isArray(data.displayItems)
+      ) {
         await this.persistSnapshot();
       }
     } catch (error) {
@@ -63,6 +76,7 @@ export class JsonFileSession implements Session {
       // generated id stable until the document is actually persisted.
       if (!this.loaded || !this.sessionId) this.sessionId = randomUUID();
       this.items = [];
+      this.displayItems = [];
     }
     this.loaded = true;
   }
@@ -75,6 +89,7 @@ export class JsonFileSession implements Session {
       schemaVersion: 1,
       sessionId: this.sessionId,
       items: this.items,
+      displayItems: this.displayItems,
     });
     return (async () => {
       await fs.mkdir(path.dirname(this.filePath), { recursive: true });
@@ -123,7 +138,9 @@ export class JsonFileSession implements Session {
   async addItems(items: AgentInputItem[]): Promise<void> {
     await this.enqueue(async () => {
       await this.loadFromDisk(true);
-      this.items.push(...sanitizeAssistantHistoryItems(items));
+      const sanitized = sanitizeAssistantHistoryItems(items);
+      this.items.push(...sanitized);
+      this.displayItems.push(...sanitized.filter(isDisplayHistoryItem));
       await this.persistSnapshot();
     });
   }
@@ -132,6 +149,17 @@ export class JsonFileSession implements Session {
     return this.enqueue(async () => {
       await this.loadFromDisk(true);
       const last = this.items.pop();
+      if (last) {
+        const signature = displayMessageSignature(last);
+        if (signature) {
+          for (let index = this.displayItems.length - 1; index >= 0; index -= 1) {
+            if (displayMessageSignature(this.displayItems[index]) === signature) {
+              this.displayItems.splice(index, 1);
+              break;
+            }
+          }
+        }
+      }
       await this.persistSnapshot();
       return last;
     });
@@ -141,6 +169,7 @@ export class JsonFileSession implements Session {
     await this.enqueue(async () => {
       await this.loadFromDisk(true);
       this.items = [];
+      this.displayItems = [];
       this.sessionId = randomUUID();
       await this.persistSnapshot();
     });
@@ -155,15 +184,64 @@ export class JsonFileSession implements Session {
     });
   }
 
+  /** Return the uncompressed message history used to restore the chat UI. */
+  async getDisplayItems(): Promise<AgentInputItem[]> {
+    return this.enqueue(async () => {
+      await this.loadFromDisk(true);
+      return this.displayItems.map((item) => ({ ...item }));
+    });
+  }
+
   /** Restore the session to a turn boundary before retrying a failed/cancelled run. */
   async truncate(length: number): Promise<void> {
     await this.enqueue(async () => {
       await this.loadFromDisk(true);
       const safeLength = Math.max(0, Math.min(this.items.length, Math.floor(length)));
+      const removed = this.items.slice(safeLength);
       this.items = this.items.slice(0, safeLength);
+      // Rollback removes the current failed turn from the UI copy as well.
+      // Compaction may have made model and display lengths diverge, so use the
+      // first user message in the removed model suffix as the boundary.
+      const firstRemovedUser = removed.find(isUserMessageItem);
+      if (firstRemovedUser) {
+        const signature = displayMessageSignature(firstRemovedUser);
+        if (signature) {
+          for (let index = this.displayItems.length - 1; index >= 0; index -= 1) {
+            if (displayMessageSignature(this.displayItems[index]) === signature) {
+              this.displayItems = this.displayItems.slice(0, index);
+              break;
+            }
+          }
+        }
+      }
       await this.persistSnapshot();
     });
   }
+}
+
+function isDisplayHistoryItem(item: AgentInputItem): boolean {
+  const value = item as { type?: unknown; role?: unknown };
+  return value.type === 'message' && (value.role === 'user' || value.role === 'assistant');
+}
+
+function isUserMessageItem(item: AgentInputItem): boolean {
+  const value = item as { type?: unknown; role?: unknown };
+  return value.type === 'message' && value.role === 'user';
+}
+
+function displayMessageSignature(item: AgentInputItem): string | undefined {
+  if (!isDisplayHistoryItem(item)) return undefined;
+  const value = item as { role?: unknown; content?: unknown };
+  return `${String(value.role)}\u0000${displayMessageText(value.content)}`;
+}
+
+function displayMessageText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .map((part) => typeof part === 'string' ? part : (part as { text?: unknown })?.text ?? '')
+    .filter((part): part is string => typeof part === 'string')
+    .join('');
 }
 
 /** 从会话条目里抽取可展示的 user/assistant 文本(用于面板重开时回放历史) */
