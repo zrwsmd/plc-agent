@@ -2802,7 +2802,7 @@ function updatePermissionMode(mode) {
   permissionMode = Object.prototype.hasOwnProperty.call(permissionModeLabels, mode)
     ? mode
     : 'ask';
-  modeChip.textContent = `Agent · ${permissionModeLabels[permissionMode]} ▾`;
+  modeChip.textContent = `${permissionModeLabels[permissionMode]} ▾`;
   modeChip.setAttribute('aria-expanded', permissionMenuEl.classList.contains('hidden') ? 'false' : 'true');
   for (const option of permissionMenuEl.querySelectorAll('[data-permission-mode]')) {
     option.classList.toggle('selected', option.dataset.permissionMode === permissionMode);

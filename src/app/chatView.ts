@@ -1576,7 +1576,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       <div class="composer-bar">
         <div class="left">
           <div class="permission-menu-wrap">
-            <button class="chip mode-chip" id="mode-chip" type="button" aria-expanded="false">Agent · 请求批准 ▾</button>
+            <button class="chip mode-chip" id="mode-chip" type="button" aria-expanded="false">请求批准 ▾</button>
             <div id="permission-menu" class="permission-menu hidden" role="menu">
               <button type="button" role="menuitem" data-permission-mode="ask">
                 <strong>请求批准</strong>
@@ -1596,7 +1596,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           <span class="chip action" id="newchat" title="创建新会话,保留历史会话">＋ 新会话</span>
         </div>
         <div class="right">
-          <button id="attach" class="tool-btn" title="添加图片" type="button">⌇</button>
+          <button id="attach" class="tool-btn" title="添加图片" aria-label="添加图片" type="button">+</button>
           <button id="gear" class="gear-btn" title="设置">⚙</button>
           <button id="retry" class="tool-btn" title="重试上一轮" disabled>↻</button>
           <button id="continue" class="tool-btn" title="继续上次任务" disabled>↪</button>
