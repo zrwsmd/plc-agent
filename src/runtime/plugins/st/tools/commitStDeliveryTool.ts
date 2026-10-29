@@ -18,13 +18,16 @@ export function createStDeliveryCommitTool(ctx: StToolBuildContext) {
     requiresStRuntimeProgram,
   } = ctx;
 
+  const completedDeliveryMessage =
+    "当前 ST 交付已经完成，不能重复调用 commit_st_delivery；请直接总结已有交付结果。";
+
   return tool({
     name: "commit_st_delivery",
     description:
       "提交最终选定的 .st 交付候选，参数必须来自最近一次 validate_st_code 成功回执。" +
       "默认的可运行 ST 交付必须包含 PROGRAM 主入口；只有明确的复用库交付才允许没有 PROGRAM。" +
       "这个工具本身不写文件：写入前调用时会登记路径和 contentHash，运行时只允许随后写入完全匹配的内容；" +
-      "写入成功后运行时自动生成正式 deliveryCommit。若旧流程在写入后再次调用本工具，会返回已有正式 commit。",
+      "写入成功后运行时自动生成正式 deliveryCommit；同一候选完成交付后不得再次调用本工具。",
     parameters: z.object({
       path: z.string().min(1).describe("最终要写入的 .st 文件路径"),
       contentHash: z.string().min(1).describe("最近一次 validate_st_code 成功回执中的 contentHash"),
@@ -61,6 +64,15 @@ export function createStDeliveryCommitTool(ctx: StToolBuildContext) {
             );
           }
           const target = await resolveWorkspacePath(path, { targetKind: "file" });
+          if (
+            validationService.hasDeliveryCommit(
+              target.relativePath,
+              contentHash,
+              target.root,
+            )
+          ) {
+            return failed(completedDeliveryMessage, "plan", "none");
+          }
           const commit = validationService.recordDeliveryCommit({
             path: target.relativePath,
             workspaceRoot: target.root,

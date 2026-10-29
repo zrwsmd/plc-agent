@@ -915,6 +915,62 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
   }
 }
 
+// An explicit command/query classification wins over a noisy Jev delivery
+// signal for temporary validation demos. The generic delivery classifier must
+// not upgrade the turn into a workspace delivery unless persistence is asked.
+{
+  let deliveryClassifierCalls = 0;
+  let receivedFallbackMode;
+  const test = await fixture(async (_cfg, _session, _text, options) => {
+    receivedFallbackMode = options.fallbackMode;
+    return {
+      status: 'completed',
+      output: 'validation demo complete',
+      usage,
+      result: completedAgentResult('validation demo complete'),
+    };
+  }, undefined, {
+    decisionService: {
+      taskHint: async () => ({
+        delivery: 'required',
+        deliveryConfidence: 0.86,
+        orchestration: 'single',
+        orchestrationConfidence: 1,
+        workflow: 'uncertain',
+        workflowConfidence: 0.51,
+        toolNeeds: {
+          readFile: { value: 'no', confidence: 0.58 },
+          writeFile: { value: 'no', confidence: 0.9 },
+          runCommand: { value: 'no', confidence: 0.9 },
+        },
+        riskLevel: 'uncertain',
+        riskConfidence: 0.75,
+        needsApproval: { value: 'uncertain', confidence: 0.34 },
+        evaluation: { status: 'ok' },
+      }),
+    },
+    classifyWorkflowDecision: async () => ({
+      kind: 'fallback',
+      mode: 'command_query',
+      confidence: 0.78,
+      reason: 'temporary validation demo',
+    }),
+    classifyDeliveryContract: async () => {
+      deliveryClassifierCalls += 1;
+      return undefined;
+    },
+  });
+  await test.coordinator.start(
+    '写一个小 demo 重新验证 ARRAY 下标语法',
+    { ...config, orchestration: 'auto' },
+    'key',
+  );
+  if (deliveryClassifierCalls !== 0 || receivedFallbackMode !== 'command_query') {
+    throw new Error(`temporary command/query demo was incorrectly upgraded to delivery: calls=${deliveryClassifierCalls}, mode=${receivedFallbackMode}, logs=${test.logs.join(' | ')}`);
+  }
+  await fs.rm(test.dir, { recursive: true, force: true });
+}
+
 // A paused run owns its workflow/delivery decision. Follow-up text after a
 // manual stop is treated as a supplement by state, not by enumerating phrases
 // such as "continue" or "use Chinese".

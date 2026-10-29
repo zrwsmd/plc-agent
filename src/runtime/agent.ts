@@ -323,6 +323,26 @@ function stableJson(value: unknown): string {
   }
   return JSON.stringify(value);
 }
+
+function dedupeArtifacts(artifacts: readonly Artifact[]): Artifact[] {
+  const seen = new Set<string>();
+  const result: Artifact[] = [];
+  for (const artifact of artifacts) {
+    const uri = typeof artifact.uri === "string" && artifact.uri.trim()
+      ? artifact.uri.trim().toLocaleLowerCase()
+      : artifact.name.trim().toLocaleLowerCase();
+    const metadataHash = artifact.metadata &&
+      typeof artifact.metadata.contentHash === "string"
+      ? artifact.metadata.contentHash
+      : undefined;
+    const identity = `${artifact.kind}|${uri}|${metadataHash ?? artifact.content ?? ""}`;
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    result.push(artifact);
+  }
+  return result;
+}
+
 function canonicalToolArguments(raw: string): string {
   try {
     return stableJson(JSON.parse(raw));
@@ -769,7 +789,10 @@ export async function runAgent(
     // Keep read/plan tools with no external effect available for a final
     // verification pass. Side-effecting tools remain unavailable after the
     // workflow has produced its delivery artifact.
-    if (toolCatalog.get(toolName)?.effect === "none") return undefined;
+    if (
+      toolName !== requiredActionTool &&
+      toolCatalog.get(toolName)?.effect === "none"
+    ) return undefined;
     return `运行时工作流“${workflowRuntime.title}”已经完成，禁止再次调用 ${toolName} 以避免重复副作用；请直接基于已完成的工具回执给出最终总结。`;
   };
   const runtimeToolGuard: RuntimeToolCallGuard = (toolName, input) => {
@@ -1588,7 +1611,11 @@ export async function runAgent(
       );
       agent.tools = tools.filter((tool) => {
         const name = toolNameOf(tool);
-        return typeof name === "string" && toolCatalog.get(name)?.effect === "none";
+        return (
+          typeof name === "string" &&
+          name !== requiredActionTool &&
+          toolCatalog.get(name)?.effect === "none"
+        );
       });
     }
   };
@@ -2718,26 +2745,21 @@ export async function runAgent(
         continue;
       }
       const verifiedArtifacts = await verifyRequiredActions();
+      const canonicalArtifacts = dedupeArtifacts([
+        ...toProtocolArtifacts(structuredOutput.artifacts),
+        ...deliveredArtifacts,
+        ...verifiedArtifacts,
+      ]);
       const canonicalOutput: IndustrialAgentOutput = {
         ...structuredOutput,
         message,
-        artifacts: [
-          ...structuredOutput.artifacts,
-          ...deliveredArtifacts.map((artifact) => ({
+        artifacts: canonicalArtifacts.map((artifact) => ({
             kind: artifact.kind,
             name: artifact.name,
             uri: artifact.uri ?? null,
             mimeType: artifact.mimeType ?? null,
             content: artifact.content ?? null,
-          })),
-          ...verifiedArtifacts.map((artifact) => ({
-            kind: artifact.kind,
-            name: artifact.name,
-            uri: artifact.uri ?? null,
-            mimeType: artifact.mimeType ?? null,
-            content: artifact.content ?? null,
-          })),
-        ],
+        })),
       };
       const projected = projectAgentOutput(
         industrialAgentOutputDefinition,

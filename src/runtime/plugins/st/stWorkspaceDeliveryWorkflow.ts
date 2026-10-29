@@ -385,9 +385,21 @@ export class StWorkspaceDeliveryWorkflow implements WorkflowRuntime {
   }
 
   private collectArtifacts(records: WorkflowToolRecord[]): Artifact[] {
+    const seen = new Set<string>();
     return records
       .map((record) => this.collectActionArtifact(record))
-      .filter((artifact): artifact is Artifact => artifact !== undefined);
+      .filter((artifact): artifact is Artifact => {
+        if (!artifact) return false;
+        const uri = (artifact.uri ?? artifact.name).trim().toLocaleLowerCase();
+        const hash = artifact.metadata &&
+          typeof artifact.metadata.contentHash === "string"
+          ? artifact.metadata.contentHash
+          : artifact.content ?? "";
+        const identity = `${artifact.kind}|${uri}|${hash}`;
+        if (seen.has(identity)) return false;
+        seen.add(identity);
+        return true;
+      });
   }
 
   private collectIssues(

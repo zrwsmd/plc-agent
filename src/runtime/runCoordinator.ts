@@ -203,15 +203,31 @@ function shouldUseRuntimeManagedWorkflow(
     isRuntimeManagedWorkflow(workflowId, contract, registry);
 }
 
-function shouldSkipDeliveryClassifier(decision: WorkflowDecision | undefined): boolean {
+function shouldSkipDeliveryClassifier(
+  decision: WorkflowDecision | undefined,
+  userText = '',
+): boolean {
   if (decision?.kind === 'workflow' && decision.workflow.runtimeManaged) return true;
   if (decision?.kind !== 'fallback') return false;
   if (decision.mode === 'blocked_high_risk') return true;
+  // A command/query route already describes the intent for
+  // validation, inspection, and temporary demos. Do not let the independent
+  // delivery classifier turn "write a small demo" into workspace delivery
+  // unless persistence was explicitly requested.
+  if (decision.mode === 'command_query' && !explicitPersistenceRequest(userText)) {
+    return true;
+  }
   return (
     (decision.mode === 'command_query' ||
       decision.mode === 'general_chat' ||
       decision.mode === 'read_only') &&
     decision.signals?.delivery === 'not_required'
+  );
+}
+
+function explicitPersistenceRequest(text: string): boolean {
+  return /(?:保存|写入|写文件|落盘|导出|提交|交付|创建文件|生成文件|写到|存到|持久化|save|write\s+file|export|persist|deliver)/iu.test(
+    text,
   );
 }
 
@@ -1154,7 +1170,11 @@ export class RunCoordinator {
         return;
       }
       if (this.isClearing(generation)) return;
-      if (!run.deliveryContract && this.classifyDeliveryContract && !shouldSkipDeliveryClassifier(workflowDecision)) {
+      if (
+        !run.deliveryContract &&
+        this.classifyDeliveryContract &&
+        !shouldSkipDeliveryClassifier(workflowDecision, userText)
+      ) {
         run.resumeStage = 'delivery';
         await this.store.update(run);
         this.emitPreflight(run, 'delivery', 'started');
@@ -1719,7 +1739,7 @@ export class RunCoordinator {
         this.workflowRegistry,
       )
         ? undefined
-        : shouldSkipDeliveryClassifier(workflowDecision)
+        : shouldSkipDeliveryClassifier(workflowDecision, run.userText)
           ? run.config.orchestration === 'team' || this.routeTeamTask ? 'routing' : 'planning'
           : 'delivery';
       announceStage(stage);

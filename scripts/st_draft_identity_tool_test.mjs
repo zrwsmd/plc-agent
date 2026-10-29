@@ -192,6 +192,12 @@ await withSession(async ({ invoke, workflow, fileExists }) => {
   assert.equal(authorization.ok, true, '正式 ST 候选应能授权写入');
   const stWrite = await invoke('write_file', { path: 'PlanDemo.st', content: code });
   assert.equal(stWrite.ok, true, '正式 ST 源码应成功写入');
+  const duplicateCommit = await invoke('commit_st_delivery', {
+    path: 'PlanDemo.st',
+    contentHash: validation.data.validatedContentHash,
+  });
+  assert.equal(duplicateCommit.ok, false, '正式交付完成后不得重复提交同一候选');
+  assert.match(duplicateCommit.error, /已经完成|重复调用/u);
 
   const records = [
     { name: 'validate_st_code', args: JSON.stringify({ code }), result: validation },
@@ -274,6 +280,16 @@ await withSession(async ({ invoke, workflow, fileExists }) => {
   const finalMessage = workflow.completionAdapter.finalMessage(records);
   assert.match(finalMessage, /PlanDemo\.plc-test-plan\.json/u);
   assert.match(finalMessage, /尚未解析或执行/u);
+
+  const duplicateArtifacts = workflow.completionAdapter.collectArtifacts([
+    ...records,
+    records[2],
+  ]);
+  assert.equal(
+    duplicateArtifacts.filter((artifact) => artifact.name === 'PlanDemo.st').length,
+    1,
+    '同一个 ST commit 回执重复出现时只能保留一个产物',
+  );
 }, {
   userText: '生成一个可运行的 ST 程序并保存到工作区',
 });
