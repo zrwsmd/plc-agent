@@ -301,6 +301,12 @@ body.settings-open { overflow: hidden; }
   border-radius: 7px;
   object-fit: contain;
   background: color-mix(in srgb, var(--box) 72%, transparent);
+  cursor: zoom-in;
+  outline: 0;
+}
+.user-attachment-preview:focus-visible {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 32%, transparent);
 }
 .user-message-text:empty { display: none; }
 .msg.user .msg-actions {
@@ -989,9 +995,68 @@ body.settings-open { overflow: hidden; }
 .attachment-list { display: flex; gap: 6px; flex-wrap: wrap; padding: 7px 10px 0; }
 .attachment-item { display: inline-flex; align-items: center; gap: 5px; max-width: 220px; padding: 3px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--muted); font-size: 12px; }
 .attachment-item img { width: 28px; height: 28px; object-fit: cover; border-radius: 4px; }
+.attachment-item img { cursor: zoom-in; }
+.attachment-item img:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
 .attachment-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .attachment-remove { border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 16px; line-height: 1; padding: 0 2px; }
 .attachment-remove:hover { color: var(--fg); }
+
+.image-preview-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 28px;
+  background: rgb(0 0 0 / 0.78);
+  cursor: zoom-out;
+}
+.image-preview-panel {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  max-width: min(96vw, 1400px);
+  max-height: 94vh;
+  cursor: default;
+}
+.image-preview-image {
+  display: block;
+  max-width: min(92vw, 1360px);
+  max-height: 90vh;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
+  border-radius: 6px;
+  background: var(--bg);
+  box-shadow: 0 20px 60px rgb(0 0 0 / 0.48);
+}
+.image-preview-close {
+  position: absolute;
+  top: -14px;
+  right: -14px;
+  z-index: 1;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--box);
+  color: var(--fg);
+  font: inherit;
+  font-size: 22px;
+  line-height: 24px;
+  cursor: pointer;
+}
+.image-preview-close:hover,
+.image-preview-close:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+}
 
 #input {
   width: 100%;

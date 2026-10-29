@@ -76,6 +76,8 @@ let pendingLocalUserText = null;
 let awaitingRunAck = false;
 let stopRequestedBeforeRunAck = false;
 let pendingImages = [];
+let imagePreviewOverlay = null;
+let imagePreviewPreviousFocus = null;
 let activeSessionId = null;
 let showThinking = true;
 let permissionMode = 'ask';
@@ -406,6 +408,76 @@ function formatSessionTime(value) {
 
 // ---------- 消息渲染 ----------
 
+function closeImagePreview() {
+  if (!imagePreviewOverlay) return;
+  imagePreviewOverlay.remove();
+  imagePreviewOverlay = null;
+  const previousFocus = imagePreviewPreviousFocus;
+  imagePreviewPreviousFocus = null;
+  if (previousFocus && typeof previousFocus.focus === 'function' && previousFocus.isConnected) {
+    previousFocus.focus();
+  }
+}
+
+function openImagePreview(src, alt, trigger) {
+  if (typeof src !== 'string' || !src.startsWith('data:image/')) return;
+  closeImagePreview();
+  imagePreviewPreviousFocus = trigger instanceof HTMLElement ? trigger : document.activeElement;
+
+  const overlay = document.createElement('div');
+  overlay.className = 'image-preview-modal';
+  overlay.setAttribute('role', 'dialog');
+  overlay.setAttribute('aria-modal', 'true');
+  overlay.setAttribute('aria-label', alt || '图片预览');
+  overlay.tabIndex = -1;
+
+  const panel = document.createElement('div');
+  panel.className = 'image-preview-panel';
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'image-preview-close';
+  close.textContent = '×';
+  close.title = '关闭图片预览';
+  close.setAttribute('aria-label', '关闭图片预览');
+  const image = document.createElement('img');
+  image.className = 'image-preview-image';
+  image.src = src;
+  image.alt = alt || '图片预览';
+  image.decoding = 'async';
+  panel.append(close, image);
+  overlay.appendChild(panel);
+
+  close.addEventListener('click', closeImagePreview);
+  overlay.addEventListener('click', (event) => {
+    if (event.target === overlay) closeImagePreview();
+  });
+  overlay.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeImagePreview();
+    }
+  });
+  imagePreviewOverlay = overlay;
+  document.body.appendChild(overlay);
+  overlay.focus();
+}
+
+function makeImagePreviewInteractive(image, label = '附件图片') {
+  image.tabIndex = 0;
+  image.setAttribute('role', 'button');
+  image.setAttribute('aria-label', `放大查看${label}`);
+  image.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openImagePreview(image.src, label, image);
+  });
+  image.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    openImagePreview(image.src, label, image);
+  });
+}
+
 function renderUserMessageContent(bubble, text, images = []) {
   bubble.replaceChildren();
   const displayImages = Array.isArray(images)
@@ -421,6 +493,7 @@ function renderUserMessageContent(bubble, text, images = []) {
       preview.alt = typeof image.name === 'string' ? image.name : '附件图片';
       preview.title = preview.alt;
       preview.loading = 'lazy';
+      makeImagePreviewInteractive(preview, preview.alt);
       previews.appendChild(preview);
     }
     bubble.appendChild(previews);
@@ -2532,6 +2605,7 @@ function renderAttachments() {
     const preview = document.createElement('img');
     preview.src = image.dataUrl;
     preview.alt = image.name;
+    makeImagePreviewInteractive(preview, image.name);
     const name = document.createElement('span');
     name.textContent = image.name;
     const remove = document.createElement('button');
