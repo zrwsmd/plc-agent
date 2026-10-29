@@ -181,7 +181,7 @@ await withSession(async ({ invoke, fileExists }) => {
   userText: '只生成一个供其他程序复用的功能块库，不需要运行和绑定任务',
 });
 
-await withSession(async ({ invoke, workflow, fileExists }) => {
+await withSession(async ({ invoke, workflow, workspaceRoot, fileExists }) => {
   const code = 'PROGRAM PlanDemo\nEND_PROGRAM';
   const validation = await invoke('validate_st_code', { code });
   assert.equal(validation.ok, true, '正式 ST 候选应通过校验');
@@ -248,7 +248,10 @@ await withSession(async ({ invoke, workflow, fileExists }) => {
     '缺少当前程序对应计划时完成门控必须阻止收尾',
   );
 
-  const planPath = 'PlanDemo.plc-test-plan.json';
+  // write_file accepts an absolute path inside the authorized workspace. The
+  // delivery commit is stored as a workspace-relative path, so the completion
+  // gate must treat both spellings as the same companion plan.
+  const planPath = path.join(workspaceRoot, 'PlanDemo.plc-test-plan.json');
   const plan = JSON.stringify({
     program: 'PlanDemo.st',
     cases: [{
@@ -261,7 +264,11 @@ await withSession(async ({ invoke, workflow, fileExists }) => {
   }, null, 2);
   const planWrite = await invoke('write_file', { path: planPath, content: plan });
   assert.equal(planWrite.ok, true, '配套测试计划应能通过通用 write_file 写入');
-  assert.equal(await fileExists(planPath), true, '计划文件应真实落盘');
+  assert.equal(
+    await fileExists('PlanDemo.plc-test-plan.json'),
+    true,
+    '计划文件应真实落盘',
+  );
   records.push({
     name: 'write_file',
     args: JSON.stringify({ path: planPath, content: plan }),

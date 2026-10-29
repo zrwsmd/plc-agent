@@ -572,6 +572,7 @@ interface SuccessfulStTestPlanWrite {
 
 interface SuccessfulCommittedStWrite {
   path: string;
+  workspaceRoot?: string;
   recordIndex: number;
 }
 
@@ -580,10 +581,16 @@ function latestSuccessfulStTestPlanWrite(
 ): SuccessfulStTestPlanWrite | undefined {
   const stWrite = latestCommittedStWrite(records);
   if (!stWrite) return undefined;
-  const expectedPath = normalizeComparablePath(expectedStTestPlanPath(stWrite.path));
+  const expectedPath = normalizeComparablePath(
+    expectedStTestPlanPath(stWrite.path),
+    stWrite.workspaceRoot,
+  );
   for (let index = records.length - 1; index > stWrite.recordIndex; index -= 1) {
     const plan = successfulStTestPlanWrite(records[index]);
-    if (plan && normalizeComparablePath(plan.path) === expectedPath) return plan;
+    if (
+      plan &&
+      normalizeComparablePath(plan.path, stWrite.workspaceRoot) === expectedPath
+    ) return plan;
   }
   return undefined;
 }
@@ -620,7 +627,14 @@ function latestCommittedStWrite(
     if (!commit || typeof commit !== "object" || Array.isArray(commit)) continue;
     const rawPath = (commit as Record<string, unknown>).path;
     if (typeof rawPath !== "string" || !rawPath.toLowerCase().endsWith(".st")) continue;
-    return { path: rawPath, recordIndex: index };
+    const workspaceRoot = (commit as Record<string, unknown>).workspaceRoot;
+    return {
+      path: rawPath,
+      ...(typeof workspaceRoot === "string" && workspaceRoot.trim()
+        ? { workspaceRoot }
+        : {}),
+      recordIndex: index,
+    };
   }
   return undefined;
 }
@@ -630,8 +644,11 @@ function expectedStTestPlanPath(stPath: string): string {
   return path.join(parsed.dir, parsed.name + ST_TEST_PLAN_EXTENSION);
 }
 
-function normalizeComparablePath(value: string): string {
-  return path.normalize(value).replace(/[\\/]+/gu, "/").toLowerCase();
+function normalizeComparablePath(value: string, workspaceRoot?: string): string {
+  const resolved = workspaceRoot && !path.isAbsolute(value)
+    ? path.resolve(workspaceRoot, value)
+    : value;
+  return path.normalize(resolved).replace(/[\\/]+/gu, "/").toLowerCase();
 }
 
 function hasSuccessfulStTestPlanWrite(records: WorkflowToolRecord[]): boolean {
