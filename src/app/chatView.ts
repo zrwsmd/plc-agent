@@ -15,6 +15,7 @@ import { DEVUNI_COMMAND_PORT_SERVICE } from '../runtime/plugins/devuni/devuniCom
 import { workspaceRootsFromWorkspaceFile } from '../runtime/plugins/devuni/devuniProjectRoots';
 import { createRuntimeServiceContainer } from '../runtime/services';
 import {
+  WEB_SEARCH_PROVIDER_IDS,
   WEB_SEARCH_SERVICE,
   type WebSearchSettings,
 } from '../runtime/plugins/websearch/webSearchProvider';
@@ -67,7 +68,7 @@ import {
   API_SETTINGS_STATE_KEY,
   LEGACY_API_KEY_SECRET_KEY,
   LEGACY_SETTINGS_STATE_KEY,
-  WEB_SEARCH_API_KEY_SECRET_KEY,
+  WEB_SEARCH_LEGACY_API_KEY_SECRET_KEY,
   apiKeySecretKey,
   apiKeySecretCandidates,
   createVendorId,
@@ -81,6 +82,7 @@ import {
   resolveStoredVendor,
   saveStoredVendor,
   vendorApiKeySecretKey,
+  webSearchApiKeySecretKey,
 } from './settingsProfiles';
 
 /**
@@ -147,6 +149,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
    * 以服务形式注入，工具层按需读取。
    */
   private webSearchSettings: WebSearchSettings = { enabled: false };
+  /** 已经存过 key 的供应商名单,只用于设置页的提示文案 */
+  private webSearchKeyedProviders: string[] = [];
   private readonly projectHandoffStore: ProjectWindowHandoffStore;
   private readonly activeProtocolRunIds = new Map<string, string>();
   private readonly pendingProjectWindows = new Map<
@@ -788,10 +792,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const rawProvider = (cfg.get<string>('webSearch.provider') ?? 'bocha').trim().toLowerCase();
     const rawMax = cfg.get<number>('webSearch.maxResults');
     const endpoint = (cfg.get<string>('webSearch.endpoint') ?? '').trim();
-    const apiKey = (await this.context.secrets.get(WEB_SEARCH_API_KEY_SECRET_KEY))?.trim();
+    const provider = rawProvider || 'bocha';
+    const apiKey = await this.readWebSearchApiKey(provider);
+    // 哪些供应商已经配过 key,前端切下拉时要用它改提示,不能等保存后才更新
+    this.webSearchKeyedProviders = await this.listWebSearchKeyedProviders();
     return {
       enabled,
-      provider: rawProvider || 'bocha',
+      provider,
       // 条数在这里就夹住:配置文件可以被手改成 999,后面没人再校验
       ...(typeof rawMax === 'number' && Number.isFinite(rawMax)
         ? { maxResults: Math.min(Math.max(Math.floor(rawMax), 1), 8) }
@@ -799,6 +806,33 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       ...(endpoint ? { endpoint } : {}),
       ...(apiKey ? { apiKey } : {}),
     };
+  }
+
+  /**
+   * 取某个供应商的 key。
+   *
+   * 该供应商名下没有、但旧版本那把共用的还在时,把它搬到这个供应商名下并删掉旧的。
+   * 只搬一次:留着它会让每个没配过的供应商都显示"已保存",又回到切换串 key 的老路。
+   */
+  private async readWebSearchApiKey(provider: string): Promise<string | undefined> {
+    const own = (await this.context.secrets.get(webSearchApiKeySecretKey(provider)))?.trim();
+    if (own) return own;
+    const legacy = (
+      await this.context.secrets.get(WEB_SEARCH_LEGACY_API_KEY_SECRET_KEY)
+    )?.trim();
+    if (!legacy) return undefined;
+    await this.context.secrets.store(webSearchApiKeySecretKey(provider), legacy);
+    await this.context.secrets.delete(WEB_SEARCH_LEGACY_API_KEY_SECRET_KEY);
+    return legacy;
+  }
+
+  private async listWebSearchKeyedProviders(): Promise<string[]> {
+    const keyed: string[] = [];
+    for (const id of WEB_SEARCH_PROVIDER_IDS) {
+      const value = (await this.context.secrets.get(webSearchApiKeySecretKey(id)))?.trim();
+      if (value) keyed.push(id);
+    }
+    return keyed;
   }
 
   /**
@@ -814,20 +848,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     try {
       const cfg = vscode.workspace.getConfiguration('plcAgent');
       const provider = typeof msg.provider === 'string' ? msg.provider.trim().toLowerCase() : '';
-      if (provider && provider !== 'bocha' && provider !== 'tavily') {
+      if (provider && !(WEB_SEARCH_PROVIDER_IDS as readonly string[]).includes(provider)) {
         this.post({ type: 'settingsError', message: `未知的搜索供应商: ${provider}` });
         return;
       }
+      const effectiveProvider = provider || 'bocha';
       const maxRaw = Number(msg.maxResults);
       const maxResults = Number.isFinite(maxRaw)
         ? Math.min(Math.max(Math.floor(maxRaw), 1), 8)
         : 5;
       await cfg.update('webSearch.enabled', msg.enabled !== false, vscode.ConfigurationTarget.Global);
-      await cfg.update('webSearch.provider', provider || 'bocha', vscode.ConfigurationTarget.Global);
+      await cfg.update('webSearch.provider', effectiveProvider, vscode.ConfigurationTarget.Global);
       await cfg.update('webSearch.maxResults', maxResults, vscode.ConfigurationTarget.Global);
       const apiKey = typeof msg.apiKey === 'string' ? msg.apiKey.trim() : '';
       if (apiKey) {
-        await this.context.secrets.store(WEB_SEARCH_API_KEY_SECRET_KEY, apiKey);
+        // 存到当前供应商名下。别存到共用位置:那会把另一家的 key 冲掉,
+        // 换回去时报的 401 完全对不上原因。
+        await this.context.secrets.store(webSearchApiKeySecretKey(effectiveProvider), apiKey);
       }
       this.webSearchSettings = await this.readWebSearchSettings(
         vscode.workspace.getConfiguration('plcAgent'),
@@ -839,12 +876,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  /** 发给前端的搜索设置:永远不带 key,只带「有没有 key」 */
+  /** 发给前端的搜索设置:永远不带 key,只带「这个供应商有没有 key」 */
   private webSearchForSettings(): {
     enabled: boolean;
     provider: string;
     maxResults: number;
     hasKey: boolean;
+    keyedProviders: string[];
     endpoint: string;
   } {
     return {
@@ -852,6 +890,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       provider: this.webSearchSettings.provider ?? 'bocha',
       maxResults: this.webSearchSettings.maxResults ?? 5,
       hasKey: !!this.webSearchSettings.apiKey,
+      keyedProviders: this.webSearchKeyedProviders,
       endpoint: this.webSearchSettings.endpoint ?? '',
     };
   }

@@ -11,8 +11,16 @@ export const LEGACY_API_KEY_SECRET_KEY = 'apiKey';
 /**
  * 联网搜索的 key。和模型 key 一样只进系统安全存储,不进 settings.json ——
  * settings.json 是纯文本,而且常常跟着工作区一起被提交。
+ *
+ * 每个供应商各存一把,键名带供应商名。早先只有一把共用的,切供应商会把上一家的
+ * key 覆盖掉,换回来时界面还显示"已保存",实际拿的是另一家的钥匙,报出来的
+ * 401 完全对不上原因。下面那个旧键名只用于迁移,读到时搬到当前供应商名下并删掉。
  */
-export const WEB_SEARCH_API_KEY_SECRET_KEY = 'webSearchApiKey';
+export function webSearchApiKeySecretKey(providerId: string): string {
+  return `webSearchApiKey.${providerId}`;
+}
+
+export const WEB_SEARCH_LEGACY_API_KEY_SECRET_KEY = 'webSearchApiKey';
 
 export interface ApiSettingsProfile {
   baseUrl: string;

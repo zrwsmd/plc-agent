@@ -44,6 +44,12 @@ export interface WebSearchProvider {
  */
 export const WEB_SEARCH_SERVICE = 'websearch.settings';
 
+/**
+ * 支持的供应商。设置页的下拉、保存时的校验、按供应商存 key 都从这里取,
+ * 三处各写一份名单的话,加一家漏一处的错迟早发生。
+ */
+export const WEB_SEARCH_PROVIDER_IDS = ['bocha', 'tavily'] as const;
+
 export interface WebSearchSettings {
   enabled?: boolean;
   provider?: string;
@@ -259,5 +265,5 @@ export function createWebSearchProvider(
   if (id === 'bocha' || id === '') return createBochaProvider(options);
   // 写错的供应商名不要静默退化成博查:那样用户会拿着 Tavily 的 key 去打博查,
   // 报出来的 401 完全对不上原因。
-  throw new Error(`未知的搜索供应商: ${id}(可选 bocha / tavily)`);
+  throw new Error(`未知的搜索供应商: ${id}(可选 ${WEB_SEARCH_PROVIDER_IDS.join(' / ')})`);
 }

@@ -3000,14 +3000,31 @@ function renderBuiltinTools(tools) {
   }
 }
 
+// 已经存过 key 的供应商。key 是按供应商分开存的,所以下拉一换,
+// "已保存" 这个提示就得跟着换 —— 否则切到没配过的那家还说已保存,
+// 用户会以为配过了,实际拿到的是另一家的钥匙。
+let webSearchKeyedProviders = [];
+
+function applyWebSearchKeyHint() {
+  const provider = setWebSearchProviderEl.value === 'tavily' ? 'tavily' : 'bocha';
+  setWebSearchKeyEl.placeholder = webSearchKeyedProviders.includes(provider)
+    ? '已保存,留空则不修改'
+    : '必填';
+}
+
 function renderWebSearch(settings) {
   const s = settings && typeof settings === 'object' ? settings : {};
   setWebSearchEnabledEl.checked = s.enabled !== false;
   setWebSearchProviderEl.value = s.provider === 'tavily' ? 'tavily' : 'bocha';
   setWebSearchMaxEl.value = typeof s.maxResults === 'number' ? String(s.maxResults) : '5';
   setWebSearchKeyEl.value = '';
-  setWebSearchKeyEl.placeholder = s.hasKey ? '已保存,留空则不修改' : '必填';
+  webSearchKeyedProviders = Array.isArray(s.keyedProviders)
+    ? s.keyedProviders.filter((id) => typeof id === 'string')
+    : (s.hasKey ? [setWebSearchProviderEl.value] : []);
+  applyWebSearchKeyHint();
 }
+
+setWebSearchProviderEl.addEventListener('change', applyWebSearchKeyHint);
 
 setWebSearchSaveEl.addEventListener('click', () => {
   settingsSavePending = true;
