@@ -59,6 +59,7 @@ export class JsonFileSession implements Session {
       this.items = sanitizeAssistantHistoryItems(data.items as AgentInputItem[]);
       const rawDisplayItems = Array.isArray(data.displayItems) ? data.displayItems : data.items;
       this.displayItems = sanitizeAssistantHistoryItems(rawDisplayItems as AgentInputItem[])
+        .map(projectDisplayHistoryItem)
         .filter(isDisplayHistoryItem);
       if (
         JSON.stringify(this.items) !== JSON.stringify(data.items) ||
@@ -140,7 +141,7 @@ export class JsonFileSession implements Session {
       await this.loadFromDisk(true);
       const sanitized = sanitizeAssistantHistoryItems(items);
       this.items.push(...sanitized);
-      this.displayItems.push(...sanitized.filter(isDisplayHistoryItem));
+      this.displayItems.push(...sanitized.filter(isDisplayHistoryItem).map(projectDisplayHistoryItem));
       await this.persistSnapshot();
     });
   }
@@ -222,6 +223,20 @@ export class JsonFileSession implements Session {
 function isDisplayHistoryItem(item: AgentInputItem): boolean {
   const value = item as { type?: unknown; role?: unknown };
   return value.type === 'message' && (value.role === 'user' || value.role === 'assistant');
+}
+
+/** Keep the UI replay copy small while preserving the full image for the model. */
+function projectDisplayHistoryItem(item: AgentInputItem): AgentInputItem {
+  const value = item as Record<string, unknown>;
+  if (value.type !== 'message' || value.role !== 'user' || !Array.isArray(value.content)) {
+    return item;
+  }
+  const content = value.content.filter((part) => {
+    return !part || typeof part !== 'object' || (part as Record<string, unknown>).type !== 'input_image';
+  });
+  return content.length === value.content.length
+    ? item
+    : { ...value, content } as unknown as AgentInputItem;
 }
 
 function isUserMessageItem(item: AgentInputItem): boolean {

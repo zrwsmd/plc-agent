@@ -79,6 +79,12 @@ import {
   type ToolRegistry,
 } from "./toolRegistry";
 import type { AgentConfig } from "./agentConfig";
+import {
+  supportsVision,
+  userMessageInputToAgentItem,
+  validateUserMessageInput,
+  type UserMessageInput,
+} from "./multimodal";
 import { shouldAutoApproveToolCall } from "./permissionPolicy";
 import { PipelineStageRuntime } from "./pipeline/stageRuntime";
 import {
@@ -189,6 +195,13 @@ export {
 } from "./agentErrors";
 export { verifyWorkspaceWrite } from "./workspaceWriteVerification";
 export {
+  normalizeImageAttachments,
+  normalizeUserMessageInput,
+  supportsVision,
+  userMessageInputToAgentItem,
+  validateUserMessageInput,
+} from './multimodal';
+export {
   composeToolSet,
   buildHistoricalExplanationContext,
   createNewTurnModelInputSession,
@@ -238,6 +251,8 @@ export interface AgentRunOptions {
   preserveToolHistory?: boolean;
   /** Decisions keyed by ApprovalRequest.id, used when resuming a checkpoint. */
   decisions?: Record<string, boolean>;
+  /** Current user turn, optionally carrying image input. */
+  userInput?: UserMessageInput;
   /** Cancels model streaming and cooperative tool execution. */
   signal?: AbortSignal;
   /** Called whenever a resumable state is available or changes. */
@@ -642,6 +657,25 @@ export async function runAgent(
     enabled: cfg.skillsEnabled !== false,
   });
   const modelAdapter = buildModelAdapter(cfg);
+  if (options.userInput) {
+    const imageError = validateUserMessageInput(options.userInput, {
+      provider: modelAdapter.provider,
+      apiFormat: modelAdapter.apiFormat,
+      baseUrl: cfg.baseUrl,
+      model: cfg.model,
+      visionMode: cfg.visionMode,
+    });
+    if (imageError) throw new Error(imageError);
+    if ((options.userInput.images?.length ?? 0) > 0 && !supportsVision({
+      provider: modelAdapter.provider,
+      apiFormat: modelAdapter.apiFormat,
+      baseUrl: cfg.baseUrl,
+      model: cfg.model,
+      visionMode: cfg.visionMode,
+    })) {
+      throw new Error(`当前模型 ${cfg.model || '未命名模型'} 不支持图片输入`);
+    }
+  }
   const model = withOneShotToolChoice(
     typeof modelAdapter.model === "string"
       ? modelAdapter.model
@@ -2394,7 +2428,11 @@ export async function runAgent(
       }
     }
 
-    const turnInput = state ?? runtimeReminderInput ?? userText;
+    const turnInput = state ?? runtimeReminderInput ?? (
+      options.userInput
+        ? [userMessageInputToAgentItem(options.userInput)]
+        : userText
+    );
     runtimeReminderInput = undefined;
     const stream = await runner.run(agent, turnInput, {
       stream: true,

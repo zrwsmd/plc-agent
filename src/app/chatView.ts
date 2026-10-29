@@ -42,6 +42,12 @@ import {
 } from '../runtime/modelAdapter';
 import { isPermissionMode, type PermissionMode } from '../runtime/agentConfig';
 import {
+  isVisionMode,
+  normalizeUserMessageInput,
+  normalizeVisionMode,
+  validateUserMessageInput,
+} from '../runtime/multimodal';
+import {
   emptyMcpSettings,
   loadMcpSettings,
   MCP_CONFIG_RELATIVE_PATH,
@@ -195,7 +201,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     view.webview.onDidReceiveMessage((msg) => {
       if (msg.type === 'send' && typeof msg.text === 'string') {
-        void this.send(msg.text);
+        void this.send(msg.text, msg.images);
       } else if (msg.type === 'compact') {
         void this.compactContext();
       } else if (msg.type === 'clear') {
@@ -570,6 +576,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     };
     const allowedDevices = stringListSetting(cfg, 'allowedDevices');
     const showThinking = cfg.get<boolean>('ui.showThinking') ?? true;
+    const visionMode = normalizeVisionMode(cfg.get<unknown>('vision.mode'));
     const jev = {
       enabled: cfg.get<boolean>('jev.enabled') ?? true,
       apiKey: (process.env.TYPESAFE_API_KEY ?? '').trim(),
@@ -740,6 +747,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       model,
       provider,
       apiFormat,
+      visionMode,
       vendorId: vendor?.id,
       vendorName: vendor?.name,
       vendors: listStoredVendors(savedProfiles).map((item) => ({
@@ -866,6 +874,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         model: cfg.model,
         provider: cfg.provider,
         apiFormat: cfg.apiFormat,
+        visionMode: cfg.visionMode,
         vendorId: cfg.vendorId ?? '',
         vendorName: cfg.vendorName ?? '',
         vendors: cfg.vendors ?? [],
@@ -892,6 +901,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     apiFormat?: AgentApiFormat;
     vendorId?: string;
     name?: string;
+    visionMode?: unknown;
   }): Promise<void> {
     const baseUrl = (msg.baseUrl ?? '').trim().replace(/\/+$/, '');
     const model = (msg.model ?? '').trim();
@@ -903,6 +913,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const provider = isAgentProvider(msg.provider)
       ? msg.provider
       : providerForApiFormat(apiFormat);
+      const visionMode = isVisionMode(msg.visionMode) ? msg.visionMode : undefined;
     try {
       resolveApiFormat(baseUrl, apiFormat, provider);
       const current = this.context.globalState.get<unknown>(API_SETTINGS_STATE_KEY);
@@ -932,6 +943,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         await this.context.secrets.store(
           vendorApiKeySecretKey(vendorId),
           msg.apiKey.trim(),
+        );
+      }
+      if (visionMode) {
+        await vscode.workspace.getConfiguration('plcAgent').update(
+          'vision.mode',
+          visionMode,
+          vscode.ConfigurationTarget.Global,
         );
       }
       this.post({
@@ -1242,7 +1260,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async send(text: string): Promise<void> {
+  private async send(text: string, rawImages?: unknown): Promise<void> {
     await this.ensureRuntime();
     // ensureRuntime() initializes and replays the active session once. Replaying
     // before every send would clear live output and restore raw session text over
@@ -1259,9 +1277,21 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const workspaceRoots = this.workspaceRoots();
     const paths = this.sessionCatalog.pathsFor(this.activeSessionId);
     const config = this.createRunConfig(live, paths, workspaceRoots);
+    const userInput = normalizeUserMessageInput(text, rawImages);
+    const imageError = validateUserMessageInput(userInput, {
+      provider: config.provider,
+      apiFormat: config.apiFormat,
+      baseUrl: config.baseUrl,
+      model: config.model,
+      visionMode: config.visionMode,
+    });
+    if (imageError) {
+      this.post({ type: 'error', message: imageError });
+      return;
+    }
     await this.sessionCatalog.touch(this.activeSessionId, titleFromUserText(text));
     await this.postSessions();
-    await this.coordinator!.start(text, config, live.apiKey);
+    await this.coordinator!.start(text, config, live.apiKey, userInput);
   }
 
   private createRunConfig(
@@ -1274,6 +1304,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       model: live.model,
       provider: live.provider,
       apiFormat: live.apiFormat,
+      visionMode: live.visionMode,
       exportDir: paths.exportDir,
       workspaceRoot: workspaceRoots[0] ?? '',
       workspaceRoots,
@@ -1458,6 +1489,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
               <label>Base URL<input id="set-base" type="text" placeholder="https://你的网关/v1" spellcheck="false" /></label>
               <label>API Key<input id="set-key" type="password" placeholder="未设置" spellcheck="false" /></label>
               <label>Model<input id="set-model" type="text" placeholder="gpt-4o-mini" spellcheck="false" /></label>
+              <label>图片输入<select id="set-vision-mode">
+                <option value="auto">自动识别模型能力</option>
+                <option value="enabled">强制启用</option>
+                <option value="disabled">关闭</option>
+              </select></label>
             </div>
             <div class="settings-actions">
               <button id="set-save" class="btn primary">保存</button>
@@ -1534,7 +1570,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   <div class="composer">
     <div class="composer-box">
       <div id="slash-command-menu" class="slash-command-menu hidden" role="listbox" aria-label="可用命令"></div>
+      <div id="attachment-list" class="attachment-list hidden" aria-label="待发送图片"></div>
       <textarea id="input" rows="1" placeholder="请输入需求…（输入 / 查看命令）" aria-controls="slash-command-menu" aria-expanded="false"></textarea>
+      <input id="attachment-input" class="hidden" type="file" accept="image/png,image/jpeg,image/webp" multiple />
       <div class="composer-bar">
         <div class="left">
           <div class="permission-menu-wrap">
@@ -1558,6 +1596,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           <span class="chip action" id="newchat" title="创建新会话,保留历史会话">＋ 新会话</span>
         </div>
         <div class="right">
+          <button id="attach" class="tool-btn" title="添加图片" type="button">⌇</button>
           <button id="gear" class="gear-btn" title="设置">⚙</button>
           <button id="retry" class="tool-btn" title="重试上一轮" disabled>↻</button>
           <button id="continue" class="tool-btn" title="继续上次任务" disabled>↪</button>

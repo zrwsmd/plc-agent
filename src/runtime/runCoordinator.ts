@@ -27,6 +27,7 @@ import type {
   RunStore,
 } from './runStore';
 import type { AgentConfig } from './agentConfig';
+import type { UserMessageInput } from './multimodal';
 import { usesOfficialOpenAIResponses } from './modelAdapter';
 import { modelContextCalibrationRouteKey } from './contextTokenEstimator';
 import type { DeliveryContract } from './deliveryContract';
@@ -958,7 +959,12 @@ export class RunCoordinator {
     }
   }
 
-  async start(userText: string, config: DurableRunConfig, apiKey: string): Promise<void> {
+  async start(
+    userText: string,
+    config: DurableRunConfig,
+    apiKey: string,
+    userInput?: UserMessageInput,
+  ): Promise<void> {
     if (this.busy || this.manualCompactionInProgress || this.transitioning || this.clearing) return;
     const generation = this.beginTransition();
     try {
@@ -998,6 +1004,14 @@ export class RunCoordinator {
         userText,
         config,
         sessionItems.length,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        userInput,
       );
       if (this.isClearing(generation)) return;
       this.emit({ type: 'user', text: userText, runId: run.id });
@@ -1552,6 +1566,7 @@ export class RunCoordinator {
         previous.workflowId,
         previous.decisionSignals,
         previous.fallbackMode,
+        previous.userInput,
       );
     const preserveSelectedContext =
       options.preserveSelectedContextForSupplement === true &&
@@ -1928,6 +1943,7 @@ export class RunCoordinator {
         previous.workflowId,
         previous.decisionSignals,
         previous.fallbackMode,
+        previous.userInput,
       );
       if (this.isClearing(generation)) return;
       await this.audit('retry_started', run, { previousRunId: previous.id });
@@ -2167,6 +2183,7 @@ export class RunCoordinator {
           run.userText,
           {
             ...agentOptions,
+            userInput: run.userInput,
             taskPlan: run.plan,
             teamTask: run.teamTask,
             workflowId: run.workflowId,
@@ -2707,6 +2724,7 @@ export class RunCoordinator {
               preserveToolHistory: options.preserveToolHistory,
               continueTurnBudget: options.continueTurnBudget,
               decisions: node.id === resumedNodeId ? resumedDecisions : undefined,
+              userInput: run.userInput,
              teamTask: run.teamTask,
              fallbackMode: run.fallbackMode,
              workflowRegistry: this.workflowRegistry,

@@ -968,6 +968,12 @@ body.settings-open { overflow: hidden; }
   transition: border-color 0.15s;
 }
 .composer-box:focus-within { border-color: var(--accent); }
+.attachment-list { display: flex; gap: 6px; flex-wrap: wrap; padding: 7px 10px 0; }
+.attachment-item { display: inline-flex; align-items: center; gap: 5px; max-width: 220px; padding: 3px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--muted); font-size: 12px; }
+.attachment-item img { width: 28px; height: 28px; object-fit: cover; border-radius: 4px; }
+.attachment-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-remove { border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 16px; line-height: 1; padding: 0 2px; }
+.attachment-remove:hover { color: var(--fg); }
 
 #input {
   width: 100%;

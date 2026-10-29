@@ -25,6 +25,11 @@ import type {
 import type { ModelContextProfile } from './contextManager';
 import { isPermissionMode, type PromptCacheSettings } from './agentConfig';
 import { isMcpSettings, type McpSettings } from './mcp/mcpConfig';
+import {
+  isVisionMode,
+  normalizeImageAttachments,
+  type UserMessageInput,
+} from './multimodal';
 
 export type DurableRunStatus =
   | 'running'
@@ -53,6 +58,7 @@ export interface DurableRunConfig {
   /** Resolved provider/format are persisted so retry uses the same endpoint. */
   provider?: AgentProvider;
   apiFormat?: AgentApiFormat;
+  visionMode?: import('./multimodal').VisionMode;
   exportDir: string;
   workspaceRoot: string;
   workspaceRoots?: string[];
@@ -83,6 +89,8 @@ export interface DurableRunRecord {
   /** Stable across retries; scopes side-effect idempotency. */
   operationId: string;
   userText: string;
+  /** Original current-turn input, including image data needed for retry/resume. */
+  userInput?: UserMessageInput;
   status: DurableRunStatus;
   config: DurableRunConfig;
   sessionItemCountBefore: number;
@@ -217,6 +225,7 @@ export interface RunStore {
     workflowId?: WorkflowId,
     decisionSignals?: WorkflowDecisionSignals,
     fallbackMode?: WorkflowFallbackMode,
+    userInput?: UserMessageInput,
   ): Promise<DurableRunRecord>;
   resume(runId: string): Promise<DurableRunRecord>;
   update(run: DurableRunRecord): Promise<void>;
@@ -254,6 +263,13 @@ function isJsonValue(value: unknown, depth = 0): boolean {
 
 function isJsonObject(value: unknown): value is Record<string, unknown> {
   return isRecord(value) && Object.values(value).every((item) => isJsonValue(item, 1));
+}
+
+function isUserMessageInput(value: unknown): value is UserMessageInput {
+  if (!isRecord(value) || typeof value.text !== 'string') return false;
+  if (value.images === undefined) return true;
+  const images = normalizeImageAttachments(value.images);
+  return Array.isArray(value.images) && images.length === value.images.length;
 }
 
 function isFiniteNonNegative(value: unknown): boolean {
@@ -441,12 +457,14 @@ export class JsonRunStore implements RunStore {
       typeof run.id !== 'string' ||
       typeof run.operationId !== 'string' ||
       typeof run.userText !== 'string' ||
+      (run.userInput !== undefined && !isUserMessageInput(run.userInput)) ||
       !statuses.includes(run.status as DurableRunStatus) ||
       !run.config ||
       typeof run.config.baseUrl !== 'string' ||
       typeof run.config.model !== 'string' ||
       (run.config.provider !== undefined && !isAgentProvider(run.config.provider)) ||
       (run.config.apiFormat !== undefined && !isAgentApiFormat(run.config.apiFormat)) ||
+      (run.config.visionMode !== undefined && !isVisionMode(run.config.visionMode)) ||
       (run.config.provider === 'anthropic' && run.config.apiFormat !== 'messages') ||
       (run.config.provider === 'openai' && run.config.apiFormat === 'messages') ||
       typeof run.config.exportDir !== 'string' ||
@@ -608,6 +626,7 @@ export class JsonRunStore implements RunStore {
     workflowId?: WorkflowId,
     decisionSignals?: WorkflowDecisionSignals,
     fallbackMode?: WorkflowFallbackMode,
+    userInput?: UserMessageInput,
   ): Promise<DurableRunRecord> {
     const now = new Date().toISOString();
     const run: DurableRunRecord = {
@@ -615,6 +634,7 @@ export class JsonRunStore implements RunStore {
       id: randomUUID(),
       operationId,
       userText,
+      userInput,
       status: 'running',
       config,
       sessionItemCountBefore,

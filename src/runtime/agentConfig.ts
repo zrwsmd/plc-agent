@@ -18,6 +18,7 @@ import type {
 import type { ModelContextProfile } from "./contextManager";
 import type { CommandRunner } from "../tools/commandRunner";
 import type { ClarificationService } from "./clarification";
+import type { VisionMode } from "./multimodal";
 
 export interface PromptCacheSettings {
   enabled?: boolean;
@@ -40,6 +41,8 @@ export interface AgentConfig {
   provider?: AgentProvider;
   /** Explicit API wire format; omitted/auto preserves the historical route. */
   apiFormat?: AgentApiFormat | "auto";
+  /** Image input policy. Auto enables only models with a known vision family. */
+  visionMode?: VisionMode;
   /** 文件导出工具的落盘目录 */
   exportDir: string;
   /** 当前工作区根目录(文件类工具的作用域边界),空 = 未打开工作区 */

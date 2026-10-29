@@ -9,6 +9,9 @@ const sessionSearchEl = document.getElementById('session-search');
 const sessionListEl = document.getElementById('session-list');
 const sessionNewBtn = document.getElementById('session-new');
 const inputEl = document.getElementById('input');
+const attachmentInputEl = document.getElementById('attachment-input');
+const attachmentListEl = document.getElementById('attachment-list');
+const attachBtn = document.getElementById('attach');
 const slashCommandMenuEl = document.getElementById('slash-command-menu');
 const sendBtn = document.getElementById('send');
 const stopBtn = document.getElementById('stop');
@@ -23,6 +26,7 @@ const setBaseEl = document.getElementById('set-base');
 const setKeyEl = document.getElementById('set-key');
 const setModelEl = document.getElementById('set-model');
 const setFormatEl = document.getElementById('set-format');
+const setVisionModeEl = document.getElementById('set-vision-mode');
 const setVendorEl = document.getElementById('set-vendor');
 const setVendorNameEl = document.getElementById('set-vendor-name');
 const setVendorAddEl = document.getElementById('set-vendor-add');
@@ -71,6 +75,7 @@ let settingsSavePending = false;
 let pendingLocalUserText = null;
 let awaitingRunAck = false;
 let stopRequestedBeforeRunAck = false;
+let pendingImages = [];
 let activeSessionId = null;
 let showThinking = true;
 let permissionMode = 'ask';
@@ -2450,7 +2455,7 @@ function isCompactRequest(text) {
 function send() {
   if (runtimeMode !== 'idle') return;
   const text = inputEl.value.trim();
-  if (!text) return;
+  if (!text && !pendingImages.length) return;
   if (canRetry && isRetryRequest(text)) {
     clearPauseNotice();
     inputEl.value = '';
@@ -2468,12 +2473,90 @@ function send() {
   clearPauseNotice();
   inputEl.value = '';
   autoGrow();
-  pendingLocalUserText = text;
+  const messageText = text || pendingImages.map((image) => `[附件图片: ${image.name}]`).join(' ');
+  const images = pendingImages.slice();
+  pendingImages = [];
+  renderAttachments();
+  pendingLocalUserText = messageText;
   awaitingRunAck = true;
   stopRequestedBeforeRunAck = false;
-  beginUserTurn(text);
-  vscode.postMessage({ type: 'send', text });
+  beginUserTurn(messageText);
+  vscode.postMessage({ type: 'send', text: messageText, images });
 }
+
+const MAX_PENDING_IMAGES = 4;
+const MAX_PENDING_IMAGE_BYTES = 8 * 1024 * 1024;
+const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
+
+function renderAttachments() {
+  if (!attachmentListEl) return;
+  attachmentListEl.replaceChildren();
+  attachmentListEl.classList.toggle('hidden', pendingImages.length === 0);
+  for (const [index, image] of pendingImages.entries()) {
+    const item = document.createElement('div');
+    item.className = 'attachment-item';
+    const preview = document.createElement('img');
+    preview.src = image.dataUrl;
+    preview.alt = image.name;
+    const name = document.createElement('span');
+    name.textContent = image.name;
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'attachment-remove';
+    remove.title = `移除 ${image.name}`;
+    remove.textContent = '×';
+    remove.addEventListener('click', () => {
+      pendingImages.splice(index, 1);
+      renderAttachments();
+    });
+    item.append(preview, name, remove);
+    attachmentListEl.appendChild(item);
+  }
+}
+
+function addImageFiles(files) {
+  const list = Array.from(files || []);
+  for (const file of list) {
+    if (pendingImages.length >= MAX_PENDING_IMAGES) {
+      addNote('error-note', `单轮最多添加 ${MAX_PENDING_IMAGES} 张图片`);
+      break;
+    }
+    if (!IMAGE_TYPES.has(file.type)) {
+      addNote('error-note', `${file.name} 不是支持的图片格式（PNG、JPEG、WebP）`);
+      continue;
+    }
+    if (file.size > MAX_PENDING_IMAGE_BYTES) {
+      addNote('error-note', `${file.name} 超过 8 MB，请压缩后重试`);
+      continue;
+    }
+    if (pendingImages.some((image) => image.name === file.name && image.size === file.size)) continue;
+    const reader = new FileReader();
+    reader.addEventListener('load', () => {
+      if (typeof reader.result !== 'string') return;
+      pendingImages.push({ name: file.name, mimeType: file.type, dataUrl: reader.result, size: file.size });
+      renderAttachments();
+    });
+    reader.readAsDataURL(file);
+  }
+}
+
+attachBtn?.addEventListener('click', () => attachmentInputEl?.click());
+attachmentInputEl?.addEventListener('change', () => {
+  addImageFiles(attachmentInputEl.files);
+  attachmentInputEl.value = '';
+});
+inputEl.addEventListener('paste', (event) => {
+  const files = event.clipboardData?.files;
+  if (files?.length) addImageFiles(files);
+});
+inputEl.addEventListener('dragover', (event) => {
+  if (event.dataTransfer?.types.includes('Files')) event.preventDefault();
+});
+inputEl.addEventListener('drop', (event) => {
+  if (!event.dataTransfer?.files?.length) return;
+  event.preventDefault();
+  addImageFiles(event.dataTransfer.files);
+});
 
 sendBtn.addEventListener('click', send);
 stopBtn.addEventListener('click', () => {
@@ -2738,6 +2821,7 @@ setSaveEl.addEventListener('click', () => {
     baseUrl: setBaseEl.value,
     apiKey: setKeyEl.value, // 留空 = 不修改已保存的 key
     model: setModelEl.value,
+    visionMode: setVisionModeEl?.value || 'auto',
     provider: providerForFormat(setFormatEl.value),
     apiFormat: setFormatEl.value,
   });
@@ -4553,6 +4637,7 @@ window.addEventListener('message', (event) => {
       setBaseEl.value = msg.baseUrl || '';
       setModelEl.value = msg.model || '';
       setFormatEl.value = msg.apiFormat || (msg.baseUrl ? 'chat_completions' : 'responses');
+      if (setVisionModeEl) setVisionModeEl.value = ['auto', 'enabled', 'disabled'].includes(msg.visionMode) ? msg.visionMode : 'auto';
       updatePermissionMode(msg.permissionMode || 'ask');
       creatingVendor = false;
       currentVendorId = msg.vendorId || '';
