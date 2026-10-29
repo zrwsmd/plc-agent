@@ -278,6 +278,15 @@ export interface AgentRunOptions {
   extraBusinessTools?: readonly Tool[];
   /** Triage mode selected for a workflow fallback; keeps prompt policy aligned with tools. */
   fallbackMode?: WorkflowFallbackMode;
+  /** Re-run routing after a successful clarification when the current turn
+   * started in the restricted needs_clarification fallback. */
+  refreshAfterClarification?: boolean;
+  /** Host callback that supplies the newly selected route/tool surface. */
+  onClarificationResolved?: (
+    result: ToolResult,
+  ) => Promise<ClarificationRefreshOptions | undefined>;
+  /** Short authoritative note for the rebuilt agent after route refresh. */
+  clarificationRefreshNote?: string;
   /**
    * Supplemental instruction supplied while resuming a paused run. It refines
    * presentation or execution preferences without replacing the original
@@ -299,6 +308,14 @@ export interface AgentRunOptions {
     eventFactory?: AgentEventFactory;
     onEvent: (event: AgentProtocolEvent) => void;
   };
+}
+
+export interface ClarificationRefreshOptions {
+  workflowId?: string;
+  deliveryContract?: DeliveryContract;
+  fallbackMode?: WorkflowFallbackMode;
+  allowedToolNames?: readonly string[];
+  clarificationRefreshNote?: string;
 }
 
 export interface AgentRunResult {
@@ -1041,6 +1058,11 @@ export async function runAgent(
       options.continueTurnBudget
         ? "本轮是用户明确触发的预算续跑。已有执行状态已经保存；请基于当前用户补充和历史回执判断是否继续原任务，只有在确实需要时才继续调用工具。"
         : "",
+      options.clarificationRefreshNote?.trim()
+        ? "本轮刚完成用户澄清。运行时已经依据澄清答案重新计算 workflow 和工具列表；" +
+          "请按下面的已确认目标继续，不要再次询问同一个问题：\n" +
+          options.clarificationRefreshNote.trim()
+        : "",
       runtimeCompletionRepairInstruction
         ? "运行时完成验收未通过。你必须继续处理,不能直接结束:\n" +
           runtimeCompletionRepairInstruction
@@ -1183,6 +1205,7 @@ export async function runAgent(
     { name: string; args: string; result: ToolResult; order: number }
   >();
   let toolCallOrder = 0;
+  let clarificationRefreshResult: ToolResult | undefined;
 
   const recordToolCall = (
     name: string,
@@ -1333,6 +1356,16 @@ export async function runAgent(
       const recordedResult =
         result ?? syntheticToolFailureResult(name, call?.args ?? "", payload);
       recordToolResult(name, callId, recordedResult);
+      if (
+        options.refreshAfterClarification &&
+        clarificationRefreshResult === undefined &&
+        name === "request_clarification" &&
+        recordedResult?.ok === true &&
+        recordedResult.data &&
+        typeof recordedResult.data === "object" &&
+        !Array.isArray(recordedResult.data) &&
+        (recordedResult.data as Record<string, unknown>).cancelled !== true
+      ) clarificationRefreshResult = recordedResult;
       refreshWorkflowCompletion();
       forceNextWorkflowToolAfterResult(name, recordedResult);
     }
@@ -2558,6 +2591,24 @@ export async function runAgent(
       throw error;
     }
     state = stream.state;
+
+    // A successful clarification may promote this turn from the restricted
+    // needs_clarification fallback to a workflow with write tools. Tool
+    // visibility is assembled when the Agent is created, so restart the turn
+    // with the refreshed route instead of continuing with the stale tool set.
+    if (clarificationRefreshResult && options.onClarificationResolved) {
+      const refreshed = await options.onClarificationResolved(clarificationRefreshResult);
+      if (refreshed) {
+        return runAgent(cfg, session, userText, {
+          ...options,
+          ...refreshed,
+          initialState: undefined,
+          preserveToolHistory: true,
+          refreshAfterClarification: false,
+          onClarificationResolved: undefined,
+        });
+      }
+    }
 
     // A gateway may complete a successful action without a final text turn.
     // Keep the existing action result fallback for that explicit empty-response

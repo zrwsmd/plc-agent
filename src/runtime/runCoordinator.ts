@@ -14,6 +14,7 @@ import {
   type AgentRunOptions,
   type AgentRunResult,
   type TurnUsage,
+  type ClarificationRefreshOptions,
 } from './agent';
 import { randomUUID } from 'node:crypto';
 import { AgentOutputValidationError } from './output';
@@ -37,7 +38,7 @@ import type { AuditEventType, AuditSink } from '../observability/audit';
 import type { RuntimeServiceContainer } from './services';
 import { LOAD_SKILL_TOOL_NAME } from './skills/skillCatalog';
 import { AgentEventFactory, type AgentProtocolEvent } from '../protocol/events';
-import { createAgentResult } from '../protocol/results';
+import { createAgentResult, type ToolResult } from '../protocol/results';
 import {
   ensureContextCompacted,
   resolveContextCompactionPolicy,
@@ -299,6 +300,35 @@ function hasSelectedRunContext(run: DurableRunRecord | undefined): boolean {
     !!run.plan ||
     !!run.teamTask
   );
+}
+
+function workflowRouteFingerprint(run: DurableRunRecord): string {
+  return JSON.stringify({
+    workflowId: run.workflowId ?? null,
+    fallbackMode: run.fallbackMode ?? null,
+    deliveryContract: run.deliveryContract ?? null,
+    toolAllowlist: run.toolAllowlist ?? null,
+  });
+}
+
+function clarificationAnswerText(result: ToolResult): string {
+  if (!result.data || typeof result.data !== 'object' || Array.isArray(result.data)) {
+    return typeof result.error === 'string' ? result.error : '用户已完成澄清';
+  }
+  const data = result.data as Record<string, unknown>;
+  const parts: string[] = [];
+  if (typeof data.selectedOptionId === 'string') parts.push(`选项=${data.selectedOptionId}`);
+  if (typeof data.customText === 'string' && data.customText.trim()) {
+    parts.push(`输入=${data.customText.trim()}`);
+  }
+  if (data.value !== undefined) parts.push(`值=${JSON.stringify(data.value)}`);
+  if (data.fields && typeof data.fields === 'object') {
+    parts.push(`字段=${JSON.stringify(data.fields)}`);
+  }
+  if (data.answers && typeof data.answers === 'object') {
+    parts.push(`答案=${JSON.stringify(data.answers)}`);
+  }
+  return parts.join('；') || '用户已完成澄清';
 }
 
 function resumeInstructionFromDisplayText(text: string | undefined): string | undefined {
@@ -2029,6 +2059,89 @@ export class RunCoordinator {
     return this.clearOperation;
   }
 
+  private async refreshRouteAfterClarification(
+    run: DurableRunRecord,
+    apiKey: string,
+    result: ToolResult,
+    mcpSession: McpSessionLease,
+  ): Promise<ClarificationRefreshOptions | undefined> {
+    if (run.fallbackMode !== 'needs_clarification') return undefined;
+    const answer = clarificationAnswerText(result);
+    const routingText =
+      `${run.userText}\n\n[运行时澄清已确认]\n${answer}\n` +
+      '澄清已经完成，请按确认后的交付目标重新选择 workflow 和工具权限。';
+    const before = workflowRouteFingerprint(run);
+    const sessionItems = await this.session.getItems();
+    let workflowDecision: WorkflowDecision | undefined;
+    try {
+      workflowDecision = await this.workflowDecisionService.decide(
+        this.agentConfig(run.config, apiKey),
+        routingText,
+        undefined,
+        sessionItems,
+        {
+          modelClassifier: this.classifyWorkflowDecision,
+          mcpServerChoices: await this.mcpServerChoices(run.config),
+        },
+      );
+      if (workflowDecision.kind === 'workflow') {
+        run.workflowId = workflowDecision.workflow.id;
+        run.deliveryContract = workflowDecision.contract ??
+          createWorkflowContract(workflowDecision.workflow, {
+            source: workflowDecision.source,
+            reason: workflowDecision.reason,
+          });
+        run.toolAllowlist = undefined;
+        run.fallbackMode = undefined;
+      } else {
+        run.workflowId = undefined;
+        run.deliveryContract = undefined;
+        run.toolAllowlist = [...(workflowDecision.allowedTools ?? [])];
+        run.fallbackMode = workflowDecision.mode;
+      }
+      run.decisionSignals = workflowDecision.signals;
+    } catch (error) {
+      this.writeLog(`[workflow] 澄清后重新分诊失败，保留原工具权限: ${this.formatError(error)}`);
+      return undefined;
+    }
+
+    if (
+      !run.deliveryContract &&
+      this.classifyDeliveryContract &&
+      !shouldSkipDeliveryClassifier(workflowDecision, routingText)
+    ) {
+      try {
+        run.deliveryContract = await this.classifyDeliveryContract(
+          this.agentConfig(run.config, apiKey),
+          routingText,
+          undefined,
+          sessionItems,
+          workflowDecision.signals ?? run.decisionSignals,
+        );
+      } catch (error) {
+        this.writeLog(`[delivery] 澄清后交付判定失败，继续使用 workflow 结果: ${this.formatError(error)}`);
+      }
+    }
+
+    const changed = before !== workflowRouteFingerprint(run);
+    if (!changed) {
+      this.writeLog(`[workflow] 澄清已完成，但路由未变化，继续当前工具权限: ${answer}`);
+      return undefined;
+    }
+    await this.store.update(run);
+    this.writeLog(
+      `[workflow] 澄清完成后已重新计算路由: ${run.workflowId ?? run.fallbackMode ?? '未定档'}` +
+      ` | tools=${run.toolAllowlist?.join('|') ?? 'workflow'}`,
+    );
+    return {
+      workflowId: run.workflowId,
+      deliveryContract: run.deliveryContract,
+      fallbackMode: run.fallbackMode,
+      allowedToolNames: mcpAllowlist(run, mcpSession.toolNames),
+      clarificationRefreshNote: answer,
+    };
+  }
+
   private async execute(
     run: DurableRunRecord,
     apiKey: string,
@@ -2213,6 +2326,9 @@ export class RunCoordinator {
             toolRegistry: this.toolRegistry,
             extraBusinessTools: this.mcpToolsFor(run, mcpSession),
             allowedToolNames: mcpAllowlist(run, mcpSession.toolNames),
+            refreshAfterClarification: run.fallbackMode === 'needs_clarification',
+            onClarificationResolved: (clarificationResult) =>
+              this.refreshRouteAfterClarification(run, apiKey, clarificationResult, mcpSession),
             signal: controller.signal,
             protocol: {
               runId: run.id,

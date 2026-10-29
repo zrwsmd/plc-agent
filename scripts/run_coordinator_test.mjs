@@ -2583,6 +2583,88 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
   await fs.rm(test.dir, { recursive: true, force: true });
 }
 
+// A successful clarification must rebuild the route/tool surface. Keeping the
+// original needs_clarification allowlist would make write_file/edit_file
+// unavailable even after the user selected a concrete edit target.
+{
+  let hintCall = 0;
+  let executeCalls = 0;
+  const test = await fixture(
+    async (_cfg, _session, _userText, options) => {
+      executeCalls += 1;
+      if (executeCalls !== 1) throw new Error('clarification route test unexpectedly restarted the executor');
+      if (options.fallbackMode !== 'needs_clarification' || options.refreshAfterClarification !== true) {
+        throw new Error('clarification run did not start with the restricted route');
+      }
+      const refreshed = await options.onClarificationResolved({
+        protocolVersion: 1,
+        ok: true,
+        data: { selectedOptionId: 'st-program', value: 'file_edit' },
+        diagnostics: [],
+        effect: 'none',
+        risk: 'plan',
+      });
+      if (
+        refreshed?.fallbackMode !== 'file_edit' ||
+        !refreshed.allowedToolNames?.includes('write_file') ||
+        !refreshed.allowedToolNames?.includes('edit_file')
+      ) {
+        throw new Error('clarification did not rebuild the file_edit tool surface');
+      }
+      return {
+        status: 'completed',
+        output: 'rerouted',
+        usage,
+        result: completedAgentResult('rerouted'),
+      };
+    },
+    undefined,
+    {
+      decisionService: {
+        taskHint: async (_jev, requestText) => {
+          hintCall += 1;
+          if (hintCall === 2 && !requestText.includes('[运行时澄清已确认]')) {
+            throw new Error('clarification answer was not included in rerouting input');
+          }
+          return hintCall === 1
+            ? {
+                delivery: 'required', deliveryConfidence: 0.95,
+                orchestration: 'unknown', orchestrationConfidence: 0,
+                workflow: 'general_chat', workflowConfidence: 0.2,
+                toolNeeds: {
+                  readFile: { value: 'unknown', confidence: 0.9 },
+                  writeFile: { value: 'unknown', confidence: 0.9 },
+                  runCommand: { value: 'no', confidence: 0.9 },
+                },
+                riskLevel: 'low', riskConfidence: 0.9,
+                needsApproval: { value: 'no', confidence: 0.9 },
+                evaluation: { status: 'ok', elapsedMs: 1 },
+              }
+            : {
+                delivery: 'not_required', deliveryConfidence: 0.95,
+                orchestration: 'single', orchestrationConfidence: 0.95,
+                workflow: 'file_edit', workflowConfidence: 0.95,
+                toolNeeds: {
+                  readFile: { value: 'yes', confidence: 0.9 },
+                  writeFile: { value: 'yes', confidence: 0.95 },
+                  runCommand: { value: 'no', confidence: 0.95 },
+                },
+                riskLevel: 'low', riskConfidence: 0.9,
+                needsApproval: { value: 'no', confidence: 0.9 },
+                evaluation: { status: 'ok', elapsedMs: 1 },
+              };
+        },
+      },
+    },
+  );
+  await test.coordinator.start('配置参数管理', config, 'key');
+  const rerouted = await test.store.getLast();
+  if (rerouted?.fallbackMode !== 'file_edit' || executeCalls !== 1) {
+    throw new Error('clarification reroute was not persisted');
+  }
+  await fs.rm(test.dir, { recursive: true, force: true });
+}
+
 // A top-level option list must not leak into steps that do not define their
 // own options. This is common when a model puts project type choices on the
 // request and asks for the path/name in later steps.
