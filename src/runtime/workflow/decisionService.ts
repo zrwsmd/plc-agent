@@ -67,27 +67,30 @@ export class WorkflowDecisionService {
       jevHint,
       actionIntent,
     );
-    if (localFallbackDecision) return localFallbackDecision;
-    const registeredWorkflowDecision = this.workflowFromRegisteredJevHint(
-      jevHint,
-      actionIntent,
-      userText,
-    );
-    if (registeredWorkflowDecision) return registeredWorkflowDecision;
-
-    const commandQueryDecision = this.workflowFromCommandQueryJevHint(jevHint, userText);
-    if (commandQueryDecision) return commandQueryDecision;
-
-    const localDecision = this.workflowFromLocalDetectors(
+    const localDecision = localFallbackDecision ?? this.workflowFromLocalDetectors(
       userText,
       history,
       workflows,
       jevHint,
       actionIntent,
     );
-    if (localDecision) return localDecision;
+
+    const registeredWorkflowDecision = this.workflowFromRegisteredJevHint(jevHint);
+    if (registeredWorkflowDecision && localDecision) {
+      this.logSemanticOverride("Jev", registeredWorkflowDecision, localDecision);
+    }
+    if (registeredWorkflowDecision) return registeredWorkflowDecision;
+
+    const commandQueryDecision = this.workflowFromCommandQueryJevHint(jevHint, userText);
+    if (commandQueryDecision && localDecision) {
+      this.logSemanticOverride("Jev", commandQueryDecision, localDecision);
+    }
+    if (commandQueryDecision) return commandQueryDecision;
 
     const safeFallbackDecision = this.workflowFromSafeJevFallback(jevHint, userText);
+    if (safeFallbackDecision && localDecision) {
+      this.logSemanticOverride("Jev", safeFallbackDecision, localDecision);
+    }
     if (safeFallbackDecision) return safeFallbackDecision;
     const safeFallbackReasons = safeFallbackMissReasons(jevHint);
     if (safeFallbackReasons.length) {
@@ -104,20 +107,28 @@ export class WorkflowDecisionService {
       workflows,
       options.modelClassifier,
       jevHint,
-      actionIntent,
     );
+    if (modelDecision && localDecision) {
+      this.logSemanticOverride("model", modelDecision, localDecision);
+    }
     if (modelDecision) return modelDecision;
+
+    // Older embedders may omit the model classifier entirely. Keep their
+    // historical local fallback, while the app runtime always provides the
+    // classifier and therefore never lets a local rule decide on its own.
+    if (!options.modelClassifier && localDecision) {
+      this.log(`[workflow] model classifier unavailable; using legacy local fallback`);
+      return localDecision;
+    }
 
     return this.fallbackFromHint(jevHint, userText);
   }
 
   private workflowFromRegisteredJevHint(
     hint: TaskDecisionHint,
-    actionIntent: CurrentActionIntent,
-    userText: string,
   ): WorkflowDecision | undefined {
     const workflow = this.registry.getByRoute(hint.workflow) ?? this.registry.get(hint.workflow);
-    if (workflow && isWorkflowCompatibleWithAction(workflow, actionIntent, userText)) {
+    if (workflow && hint.workflowConfidence >= MIN_SAFE_JEV_WORKFLOW_CONFIDENCE) {
       const contract = createWorkflowContract(workflow, {
         source: "jev",
         reason: `Jev 高置信度识别为 ${workflow.title}(${hint.workflowConfidence.toFixed(2)})`,
@@ -137,9 +148,9 @@ export class WorkflowDecisionService {
     }
     if (workflow) {
       this.log(
-        isReadOnlyBlockedWorkflow(workflow, userText)
-          ? `[workflow] 忽略 ${workflow.id}: 用户只要求校验/检查，不需要改动代码`
-          : `[workflow] 忽略 ${workflow.id}: 当前动作 ${actionIntent} 不在该 workflow 的兼容范围内`,
+        `[workflow] Jev workflow ${workflow.id} confidence ` +
+          `${hint.workflowConfidence.toFixed(2)}<${MIN_SAFE_JEV_WORKFLOW_CONFIDENCE.toFixed(2)}; ` +
+          `交给模型继续判定`,
       );
     }
     return undefined;
@@ -157,7 +168,7 @@ export class WorkflowDecisionService {
       if (!fallback) continue;
       const allowedTools = this.allowedToolsForFallback(fallback.mode, userText);
       this.log(
-        `[workflow] local fallback ${fallback.mode}(${fallback.confidence.toFixed(2)})` +
+        `[workflow] local candidate fallback ${fallback.mode}(${fallback.confidence.toFixed(2)})` +
           ` from ${workflow.id}: ${fallback.reason}` +
           (allowedTools?.length ? ` | tools=${allowedTools.join("|")}` : ""),
       );
@@ -259,7 +270,7 @@ export class WorkflowDecisionService {
         reason: match.reason,
       });
       this.log(
-        `[workflow] local 命中 ${workflow.id}(${match.confidence.toFixed(2)}): ${match.reason}`,
+        `[workflow] local candidate workflow ${workflow.id}(${match.confidence.toFixed(2)}): ${match.reason}`,
       );
       return {
         kind: "workflow",
@@ -282,7 +293,6 @@ export class WorkflowDecisionService {
     workflows: readonly WorkflowDescriptor[],
     classifier: WorkflowModelClassifier | undefined,
     hint: TaskDecisionHint,
-    actionIntent: CurrentActionIntent,
   ): Promise<WorkflowDecision | undefined> {
     if (!classifier) return undefined;
     let decision: WorkflowModelDecision | undefined;
@@ -297,14 +307,6 @@ export class WorkflowDecisionService {
     if (decision.kind === "workflow") {
       const workflow = this.registry.get(decision.workflowId);
       if (!workflow) return undefined;
-      if (!isWorkflowCompatibleWithAction(workflow, actionIntent, userText)) {
-        this.log(
-          isReadOnlyBlockedWorkflow(workflow, userText)
-            ? `[workflow] 忽略模型 workflow ${workflow.id}: 用户只要求校验/检查，不需要改动代码`
-            : `[workflow] 忽略模型 workflow ${workflow.id}: 当前动作 ${actionIntent} 不在兼容范围内`,
-        );
-        return undefined;
-      }
       const contract = createWorkflowContract(workflow, {
         source: "model",
         reason: decision.reason,
@@ -378,19 +380,20 @@ export class WorkflowDecisionService {
     return allowedToolsForFallback(mode);
   }
 
-}
-
-function isWorkflowCompatibleWithAction(
-  workflow: WorkflowDescriptor,
-  actionIntent: CurrentActionIntent,
-  userText: string,
-): boolean {
-  // 改动类工作流不接纯只读请求：用户只想校验、检查，不需要走提交和写盘。
-  if (workflow.requiresCodeChange && isReadOnlyInspectionRequest(userText)) {
-    return false;
+  private logSemanticOverride(
+    source: "Jev" | "model",
+    semanticDecision: WorkflowDecision,
+    localDecision: WorkflowDecision,
+  ): void {
+    const semantic = decisionLabel(semanticDecision);
+    const local = decisionLabel(localDecision);
+    this.log(
+      semantic === local
+        ? `[workflow] ${source} confirmed local candidate ${local}`
+        : `[workflow] ${source} overrides local candidate ${local} -> ${semantic}`,
+    );
   }
-  const allowed = workflow.actionIntents;
-  return !allowed || allowed.length === 0 || allowed.includes(actionIntent);
+
 }
 
 /** 被 requiresCodeChange 挡下来的工作流要单独说清楚原因，别混进"动作不兼容"。 */
@@ -399,6 +402,12 @@ function isReadOnlyBlockedWorkflow(
   userText: string,
 ): boolean {
   return workflow.requiresCodeChange === true && isReadOnlyInspectionRequest(userText);
+}
+
+function decisionLabel(decision: WorkflowDecision): string {
+  return decision.kind === "workflow"
+    ? `workflow:${decision.workflow.id}`
+    : `fallback:${decision.mode}`;
 }
 
 function signalsFromHint(hint: TaskDecisionHint): WorkflowDecisionSignals {

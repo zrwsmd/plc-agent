@@ -599,13 +599,13 @@ let localWorkflowClassifierCalls = 0;
 const localWorkflow = {
   id: 'local_precedence',
   title: 'Local precedence test',
-  description: 'Verifies local workflow detection runs before safe Jev fallback.',
+  description: 'Verifies semantic routing outranks a local workflow candidate.',
   runtimeManaged: false,
   businessToolNames: ['read_file'],
   localMatch: () => ({
     matched: true,
     confidence: 0.93,
-    reason: 'local workflow matched before safe fallback',
+    reason: 'local workflow candidate matched',
   }),
 };
 const localPrecedenceDecision = await new WorkflowDecisionService(
@@ -643,12 +643,77 @@ const localPrecedenceDecision = await new WorkflowDecisionService(
     },
   },
 );
-assert.equal(localPrecedenceDecision.kind, 'workflow');
-assert.equal(localPrecedenceDecision.workflow.id, 'local_precedence');
-assert.equal(localPrecedenceDecision.source, 'local');
-assert.deepEqual(localPrecedenceDecision.workflow.businessToolNames, ['read_file']);
-assert.equal(localPrecedenceDecision.allowedTools, undefined);
+assert.equal(localPrecedenceDecision.kind, 'fallback');
+assert.equal(localPrecedenceDecision.mode, 'general_chat');
+assert.equal(localPrecedenceDecision.source, 'jev');
 assert.equal(localWorkflowClassifierCalls, 0);
+
+const inconclusiveJevHint = {
+  delivery: 'unknown',
+  deliveryConfidence: 0.1,
+  orchestration: 'unknown',
+  orchestrationConfidence: 0.1,
+  workflow: 'unknown',
+  workflowConfidence: 0.2,
+  toolNeeds: {
+    readFile: { value: 'unknown', confidence: 0.1 },
+    writeFile: { value: 'unknown', confidence: 0.1 },
+    runCommand: { value: 'unknown', confidence: 0.1 },
+  },
+  riskLevel: 'unknown',
+  riskConfidence: 0.1,
+  needsApproval: { value: 'unknown', confidence: 0.1 },
+  evaluation: { status: 'ok', elapsedMs: 1 },
+};
+let modelOverLocalCalls = 0;
+const modelOverLocalDecision = await new WorkflowDecisionService(
+  () => {},
+  { taskHint: async () => inconclusiveJevHint },
+  new WorkflowRegistry([localWorkflow]),
+  coreCatalog,
+).decide(
+  safeJevConfig,
+  '触发本地 workflow',
+  undefined,
+  [],
+  {
+    modelClassifier: async () => {
+      modelOverLocalCalls += 1;
+      return {
+        kind: 'fallback',
+        mode: 'read_only',
+        confidence: 0.92,
+        reason: 'model overruled the local workflow candidate',
+      };
+    },
+  },
+);
+assert.equal(modelOverLocalDecision.kind, 'fallback');
+assert.equal(modelOverLocalDecision.mode, 'read_only');
+assert.equal(modelOverLocalDecision.source, 'model');
+assert.equal(modelOverLocalCalls, 1);
+
+const failedModelOverLocalDecision = await new WorkflowDecisionService(
+  () => {},
+  { taskHint: async () => inconclusiveJevHint },
+  new WorkflowRegistry([localWorkflow]),
+  coreCatalog,
+).decide(
+  safeJevConfig,
+  '触发本地 workflow',
+  undefined,
+  [],
+  {
+    modelClassifier: async () => {
+      throw new Error('classifier unavailable');
+    },
+  },
+);
+assert.notEqual(
+  failedModelOverLocalDecision.source,
+  'local',
+  '提供了模型裁决器但调用失败时，本地候选也不能独立成为最终结论',
+);
 
 let modelClassifierCallsForRejectedSafeJev = 0;
 const rejectedSafeJevDecision = await new WorkflowDecisionService(

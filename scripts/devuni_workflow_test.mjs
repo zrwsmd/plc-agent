@@ -159,8 +159,8 @@ for (const [text, expectedTool] of [
   );
 }
 
-// The same action boundary must protect against a stale/high-confidence
-// Jev route and a model classifier route, not only the local matcher.
+// Semantic arbiters outrank the local action boundary. A high-confidence Jev
+// route is final; when Jev is not confident, the model owns the decision.
 const forcedProjectHint = {
   delivery: 'required',
   deliveryConfidence: 0.95,
@@ -187,22 +187,40 @@ const forcedJevDecision = await forcedProjectRoute.decide(
   cfg,
   '在刚刚新建的工程下面写入一个文件 asd.txt，内容是 hello',
 );
-assert.notEqual(workflowIdOf(forcedJevDecision), DEVUNI_PROJECT_WORKFLOW_ID);
-const forcedModelDecision = await forcedProjectRoute.decide(
+assert.equal(workflowIdOf(forcedJevDecision), DEVUNI_PROJECT_WORKFLOW_ID);
+assert.equal(forcedJevDecision.source, 'jev');
+
+const lowConfidenceProjectRoute = new WorkflowDecisionService(
+  () => {},
+  {
+    taskHint: async () => ({
+      ...forcedProjectHint,
+      workflowConfidence: 0.84,
+      toolNeeds: {
+        ...forcedProjectHint.toolNeeds,
+        writeFile: { value: 'no', confidence: 0.95 },
+      },
+    }),
+  },
+  createAppWorkflowRegistry(),
+);
+const forcedModelDecision = await lowConfidenceProjectRoute.decide(
   cfg,
   '在刚刚新建的工程下面写入一个文件 asd.txt，内容是 hello',
   undefined,
   [],
   {
     modelClassifier: async () => ({
-      kind: 'workflow',
-      workflowId: DEVUNI_PROJECT_WORKFLOW_ID,
+      kind: 'fallback',
+      mode: 'file_edit',
       confidence: 0.99,
-      reason: 'intentionally stale project route',
+      reason: 'model overruled the low-confidence Jev project route',
     }),
   },
 );
 assert.notEqual(workflowIdOf(forcedModelDecision), DEVUNI_PROJECT_WORKFLOW_ID);
+assert.equal(forcedModelDecision.mode, 'file_edit');
+assert.equal(forcedModelDecision.source, 'model');
 
 /* ------------------------------------------------------------------ */
 /* [4] 运行时:名单原样发,不经过风险过滤和文本收窄                      */

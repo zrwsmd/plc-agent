@@ -127,11 +127,10 @@ const commentEditDecision = await stRouting.decide(
     },
   },
 );
-assert.equal(commentEditDecision.kind, 'fallback');
-assert.equal(commentEditDecision.mode, 'file_edit');
-assert.equal(commentEditDecision.source, 'local');
-assert.equal(nonSemanticClassifierCalls, 0, '明确的非语义 ST 编辑不应再调用独立模型分类器');
-assert(commentEditDecision.allowedTools.includes('edit_file'));
+assert.equal(commentEditDecision.kind, 'workflow');
+assert.equal(commentEditDecision.workflow.id, 'st_workspace_delivery');
+assert.equal(commentEditDecision.source, 'jev');
+assert.equal(nonSemanticClassifierCalls, 0, '高置信度 Jev 应直接决策，不再调用独立模型分类器');
 
 const logicEditDecision = await stRouting.decide(
   {
@@ -146,14 +145,14 @@ const logicEditDecision = await stRouting.decide(
 assert.equal(logicEditDecision.kind, 'workflow');
 assert.equal(logicEditDecision.workflow.id, 'st_workspace_delivery');
 
-// 只读校验不属于改动类工作流。Jev 即使把 st_delivery 报上来，也不能接。
+// Jev 未达到高置信度时，本地只读规则只能提供候选，最终由模型裁决。
 const readOnlyHint = {
   delivery: 'not_required',
   deliveryConfidence: 0.58,
   orchestration: 'single',
   orchestrationConfidence: 0.98,
   workflow: 'st_delivery',
-  workflowConfidence: 0.85,
+  workflowConfidence: 0.84,
   toolNeeds: {
     readFile: { value: 'yes', confidence: 0.78 },
     writeFile: { value: 'no', confidence: 0.66 },
@@ -187,21 +186,47 @@ const inspectionDecision = await readOnlyRouting.decide(
     modelClassifier: async () => {
       readOnlyClassifierCalls += 1;
       return {
-        kind: 'workflow',
-        workflowId: 'st_workspace_delivery',
+        kind: 'fallback',
+        mode: 'read_only',
         confidence: 0.99,
-        reason: 'intentionally overbroad classifier result',
+        reason: 'model confirmed a read-only inspection',
       };
     },
   },
 );
 assert.notEqual(inspectionDecision.kind, 'workflow', '只读校验不能被改动类工作流接住');
 assert.equal(inspectionDecision.mode, 'read_only');
-assert.equal(readOnlyClassifierCalls, 1, 'Jev 报的改动类工作流被挡下后应继续往下判');
+assert.equal(inspectionDecision.source, 'model');
+assert.equal(readOnlyClassifierCalls, 1, 'Jev 置信度不足时应继续交给模型判定');
 assert(
-  routingLogs.some((line) => line.includes('用户只要求校验/检查')),
-  '被只读判定挡下的工作流必须说明原因',
+  routingLogs.some((line) => line.includes('交给模型继续判定')),
+  'Jev 置信度不足时必须明确进入模型裁决',
 );
+
+// 业务条件里的“错误”不能再让本地只读规则推翻模型的 ST 交付结论。
+const semanticDeliveryDecision = await readOnlyRouting.decide(
+  {
+    baseUrl: '',
+    apiKey: 'test',
+    model: 'test',
+    exportDir: process.cwd(),
+    workspaceRoot: process.cwd(),
+  },
+  '电机星三角降压启动，任何相序错误立即报警并禁止启动',
+  undefined,
+  [],
+  {
+    modelClassifier: async () => ({
+      kind: 'workflow',
+      workflowId: 'st_workspace_delivery',
+      confidence: 0.98,
+      reason: 'model identified a request to produce PLC control logic',
+    }),
+  },
+);
+assert.equal(semanticDeliveryDecision.kind, 'workflow');
+assert.equal(semanticDeliveryDecision.workflow.id, 'st_workspace_delivery');
+assert.equal(semanticDeliveryDecision.source, 'model');
 
 // 同一句话只要出现写、改、生成的动词，就不该被只读判定挡掉。
 const repairDecision = await readOnlyRouting.decide(
@@ -213,9 +238,20 @@ const repairDecision = await readOnlyRouting.decide(
     workspaceRoot: process.cwd(),
   },
   '校验项目的st有没有语法错误，有的话修复',
+  undefined,
+  [],
+  {
+    modelClassifier: async () => ({
+      kind: 'workflow',
+      workflowId: 'st_workspace_delivery',
+      confidence: 0.98,
+      reason: 'model confirmed validation followed by repair',
+    }),
+  },
 );
 assert.equal(repairDecision.kind, 'workflow');
 assert.equal(repairDecision.workflow.id, 'st_workspace_delivery');
+assert.equal(repairDecision.source, 'model');
 
 assert.equal(isReadOnlyInspectionRequest('校验项目的st有没有语法错误'), true);
 assert.equal(isReadOnlyInspectionRequest('看看这个 ST 文件有没有问题'), true);
