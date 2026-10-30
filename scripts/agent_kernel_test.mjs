@@ -979,8 +979,8 @@ async function runTestTurn(
   }
 }
 
-// [3c4b] 坏模型可能在交付已经完成后又发起新的 write_file,同时补做一次
-// 无副作用校验。运行时应允许核验,但不再暴露第二张写入审批卡。
+// [3c4b] 坏模型可能在交付已经完成后又发起新的 write_file 或校验。
+// 完成门通过后本轮工具全部关闭，不能再进入第二次执行循环。
 {
   const asked = [];
   const contract = normalizeWorkflowContract({
@@ -1020,8 +1020,8 @@ async function runTestTurn(
   if (approvalRequests.length !== 1 || asked.length !== 1 || asked[0].name !== 'write_file') {
     throw new Error('交付完成后的重复 write_file 不应再次暴露给用户审批');
   }
-  if (toolCalls.join(',') !== 'validate_st_code,commit_st_delivery,write_file,validate_st_code') {
-    throw new Error('交付完成后的重复写入应拦截,但无副作用校验应允许继续');
+  if (toolCalls.join(',') !== 'validate_st_code,commit_st_delivery,write_file') {
+    throw new Error('交付完成后的重复写入和校验都不应再次执行');
   }
   if (toolCalls.filter((name) => name === 'write_file').length !== 1) {
     throw new Error('交付完成后的重复 write_file 被执行了多次');

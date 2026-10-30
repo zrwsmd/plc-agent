@@ -794,23 +794,9 @@ export async function runAgent(
   // 工作流完成之后模型仍会反复尝试调用已经被拦的业务工具，每次都是一整轮模型往返。
   // 完成的那一刻把工具从 agent 上摘掉，模型下一轮没有工具可调，只能写总结。
   let completionCut = false;
-  const workflowToolNames =
-    workflowBusinessToolPolicy?.mode === "allow_list"
-      ? new Set(workflowBusinessToolPolicy.names ?? [])
-      : undefined;
   const completedWorkflowToolRejection = (toolName: string): string | undefined => {
     if (!workflowRuntime || !workflowCompleted) return undefined;
-    if (workflowToolNames && !workflowToolNames.has(toolName)) {
-      return undefined;
-    }
-    // Keep read/plan tools with no external effect available for a final
-    // verification pass. Side-effecting tools remain unavailable after the
-    // workflow has produced its delivery artifact.
-    if (
-      toolName !== requiredActionTool &&
-      toolCatalog.get(toolName)?.effect === "none"
-    ) return undefined;
-    return `运行时工作流“${workflowRuntime.title}”已经完成，禁止再次调用 ${toolName} 以避免重复副作用；请直接基于已完成的工具回执给出最终总结。`;
+    return `运行时工作流“${workflowRuntime.title}”已经完成，禁止再次调用 ${toolName}；请直接基于已完成的工具回执给出最终总结。`;
   };
   const runtimeToolGuard: RuntimeToolCallGuard = (toolName, input) => {
     const workflowReason = completedWorkflowToolRejection(toolName);
@@ -1631,25 +1617,19 @@ export async function runAgent(
     if (!workflowCompletionLogged) {
       workflowCompletionLogged = true;
       agentLog(
-        `[workflow] ${workflowRuntime.title} 已完成，后续副作用 workflow 工具调用将被阻止以避免重复执行`,
+        `[workflow] ${workflowRuntime.title} 完成门已通过，停止本轮工具执行`,
       );
     }
-    // 只摘掉有副作用工具，保留无副作用的核验/只读工具。这样模型如果
-    // 发现需要用另一份完整候选重新校验，仍能真实调用验证工具；写入类
-    // 工具则不会在交付完成后再次执行。
+    // 完成门通过后，本轮工作流已经结束。统一收起全部工具，避免模型
+    // 把“最终核验”误变成新的执行循环（例如反复调用校验工具）。
+    // 新需求会由协调器创建新的运行并重新计算工具权限；旧运行不能继续
+    // 借用当前轮的工具入口。
     if (!completionCut) {
       completionCut = true;
       agentLog(
-        `[workflow] ${workflowRuntime.title} 已交付完成，收起副作用工具，保留无副作用核验工具`,
+        `[workflow] ${workflowRuntime.title} 已交付完成，收起本轮全部工具，等待最终总结`,
       );
-      agent.tools = tools.filter((tool) => {
-        const name = toolNameOf(tool);
-        return (
-          typeof name === "string" &&
-          name !== requiredActionTool &&
-          toolCatalog.get(name)?.effect === "none"
-        );
-      });
+      agent.tools = [];
     }
   };
 

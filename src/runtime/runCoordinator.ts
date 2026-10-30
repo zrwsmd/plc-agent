@@ -281,14 +281,33 @@ function commandRunnerFromConfig(config: DurableRunCommandConfig | undefined): C
   });
 }
 
-function shouldStartFreshInsteadOfResume(text: string | undefined): boolean {
-  const normalized = String(text ?? '').replace(/\s+/g, ' ').trim();
+function isExplicitContinuationRequest(text: string | undefined): boolean {
+  const normalized = String(text ?? '').replace(/\s+/gu, ' ').trim();
+  if (!normalized) return false;
+  // A normal message is a new request. Only an explicit continuation prefix
+  // may reuse a paused run's execution checkpoint.
+  return (
+    /^(?:继续|接着)(?:$|[\s,，。.!！:：]|吧|一下|执行|处理|做|完成|刚才|上次|当前|这个|任务|写|修改|修复|生成|校验|分析|回答)/u.test(normalized) ||
+    /^恢复(?:$|[\s,，。.!！:：]|吧|一下|执行|处理|刚才|上次|当前|这个|任务|断点)/u.test(normalized) ||
+    /^从(?:当前|刚才|上次|这个)?断点(?:$|[\s,，。.!！:：]|继续|恢复|执行)/u.test(normalized) ||
+    /^(?:resume|continue)(?:$|[\s,.!:])/iu.test(normalized)
+  );
+}
+
+function isExplicitDiscardRequest(text: string | undefined): boolean {
+  const normalized = String(text ?? '').replace(/\s+/gu, ' ').trim();
   if (!normalized) return false;
   return (
     /(?:不要|不用|别|别再)(?:继续|接着|恢复|续跑|执行|做)(?:了|啦)?[。！!,.，、\s]*$/u.test(normalized) ||
     /(?:取消|放弃)(?:刚才|上次|前面|当前|本轮|这个)?(?:任务|运行|请求|生成|交付|继续|续跑)?[。！!,.，、\s]*$/u.test(normalized) ||
     /(?:重新来|重来|从头开始|重新开始|开新任务|新任务|另一个任务|换个任务|改做另一个)/u.test(normalized)
   );
+}
+
+function shouldStartFreshInsteadOfResume(text: string | undefined): boolean {
+  // Do not infer continuity from the wording or the previous transcript.
+  // Resume is an explicit user action; everything else starts a new run.
+  return !isExplicitContinuationRequest(text);
 }
 
 function hasSelectedRunContext(run: DurableRunRecord | undefined): boolean {
@@ -333,7 +352,7 @@ function clarificationAnswerText(result: ToolResult): string {
 
 function resumeInstructionFromDisplayText(text: string | undefined): string | undefined {
   const normalized = String(text ?? '').trim();
-  if (!normalized || shouldStartFreshInsteadOfResume(normalized)) return undefined;
+  if (!normalized || isExplicitDiscardRequest(normalized)) return undefined;
   return normalized;
 }
 
