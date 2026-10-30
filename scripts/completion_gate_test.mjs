@@ -125,6 +125,48 @@ const validationContract = normalizeWorkflowContract({
   assert(gate.passed, '恢复账本的重复局部序号不应阻断后续成功');
 }
 
+{
+  const failedCommand = createToolResult({
+    ok: false,
+    error: '命令执行失败，退出码 1',
+    data: { exitCode: 1 },
+    effect: 'process',
+    risk: 'execute',
+  });
+  const passedCommand = createToolResult({
+    ok: true,
+    data: { exitCode: 0, output: '5.1.19041.1320' },
+    effect: 'process',
+    risk: 'execute',
+  });
+  const gate = evaluateCompletionGate({
+    userText: '看看 PowerShell 版本',
+    finalMessage: '查询成功。当前 PowerShell 版本为 5.1.19041.1320。',
+    toolResults: [
+      {
+        name: 'run_command',
+        args: JSON.stringify({
+          command: 'powershell -NoProfile -Command "$PSVersionTable.PSVersion.ToString()"',
+          shell: 'powershell',
+        }),
+        result: failedCommand,
+        order: 1,
+      },
+      {
+        name: 'run_command',
+        args: JSON.stringify({
+          command: '$PSVersionTable.PSVersion.ToString()',
+          shell: 'powershell',
+        }),
+        result: passedCommand,
+        order: 2,
+      },
+    ],
+  });
+  console.log('[completion_gate:4c] 修正版查询命令成功后收敛 =', gate.passed);
+  assert(gate.passed, '修正版 run_command 已成功时不应继续追逐早先失败的命令文本');
+}
+
 const codeContract = normalizeWorkflowContract({
   requiresDeliverable: true,
   reason: '用户要求生成可交付代码',

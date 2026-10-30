@@ -1947,11 +1947,11 @@ export async function runAgent(
   const continueAfterCompletionGateFailure = (
     currentState: RunState<any, any>,
     gate: Exclude<CompletionGateResult, { passed: true }>,
-  ): void => {
+  ): boolean => {
     if (completionGateRetries >= MAX_COMPLETION_GATE_RETRIES) {
       terminalFailureOutput = synthesizeStructuredFailureFromEvidence(gate);
       agentLog(`[completion_gate] 已达到最大修复次数，返回结构化失败结果: ${gate.reason}`);
-      return;
+      return false;
     }
     completionGateRetries += 1;
     runtimeCompletionRepairInstruction = gate.repairInstruction;
@@ -1998,6 +1998,7 @@ export async function runAgent(
     state = undefined;
     structuredOutput = undefined;
     output = "";
+    return true;
   };
 
   const effectToolKeyByCallId = new Map<string, string>();
@@ -2703,7 +2704,10 @@ export async function runAgent(
         const gate = runCompletionGate(message);
         await reviewCompletionGateDecision(message, [], gate);
         if (!gate.passed) {
-          continueAfterCompletionGateFailure(state, gate);
+          const shouldContinue = continueAfterCompletionGateFailure(state, gate);
+          if (!shouldContinue && terminalFailureOutput) {
+            return failedAgentRunResult(terminalFailureOutput);
+          }
           continue;
         }
         const canonicalOutput: IndustrialAgentOutput = {
@@ -2791,8 +2795,10 @@ export async function runAgent(
       const gate = runCompletionGate(message, structuredProjection.artifacts);
       await reviewCompletionGateDecision(message, structuredProjection.artifacts, gate);
       if (!gate.passed) {
-        continueAfterCompletionGateFailure(state, gate);
-        if (terminalFailureOutput) return failedAgentRunResult(terminalFailureOutput);
+        const shouldContinue = continueAfterCompletionGateFailure(state, gate);
+        if (!shouldContinue && terminalFailureOutput) {
+          return failedAgentRunResult(terminalFailureOutput);
+        }
         continue;
       }
       const verifiedArtifacts = await verifyRequiredActions();

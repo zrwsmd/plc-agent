@@ -20,7 +20,7 @@ export function createRunCommandTool(ctx: ToolBuildContext) {
     description:
       "在工作区根目录执行一条命令(60 秒超时,输出截断)。属于危险操作,执行前需要用户批准。" +
       "shell=auto 时 Windows 会自动识别 Get-Content、Select-Object、$env: 等 PowerShell 命令；普通 node/git/npm/rg 命令保持原有 shell。" +
-      "需要时可显式指定 shell=powershell、native 或 auto。",
+      "需要时可显式指定 shell=powershell、native 或 auto。shell=powershell 时 command 只填写 PowerShell 脚本正文，不要再次套 powershell/pwsh -Command。",
     parameters: z.object({
       command: z.string().describe("要执行的命令行"),
       shell: z.enum(["auto", "native", "powershell"]).optional().describe(

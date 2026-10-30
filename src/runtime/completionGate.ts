@@ -166,12 +166,32 @@ function hasLaterDirectResolution(
   records: (CompletionGateToolRecord & { order: number })[],
   input: CompletionGateInput,
 ): boolean {
-  return records.some((record) => {
+  const laterSameToolRecords = records.filter((record) => {
     if (record.order <= issue.order) return false;
     if (record.name !== issue.toolName) return false;
-    if (targetKeyFor(record) !== issue.targetKey) return false;
-    return !issueFromToolResult(record, input);
+    return true;
   });
+  if (laterSameToolRecords.some((record) =>
+    targetKeyFor(record) === issue.targetKey &&
+    !issueFromToolResult(record, input)
+  )) {
+    return true;
+  }
+
+  // Command queries often recover by changing the command itself, for example
+  // replacing a failing nested `powershell -Command` with its script body. The
+  // command string is an attempt, not a durable resource identity. When no
+  // delivery contract is active, a final successful retry of the command tool
+  // supersedes an earlier failed attempt in the same turn.
+  if (
+    issue.toolName === 'run_command' &&
+    input.deliveryContract?.requiresDeliverable !== true
+  ) {
+    const latestRetry = laterSameToolRecords.at(-1);
+    return !!latestRetry && !issueFromToolResult(latestRetry, input);
+  }
+
+  return false;
 }
 
 function hasLaterDeliveryResolution(

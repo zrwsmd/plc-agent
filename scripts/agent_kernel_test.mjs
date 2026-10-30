@@ -1819,6 +1819,31 @@ async function runTestTurn(
   }
 }
 
+// [8d2] 完成门修复预算耗尽后必须结束当前 run，不能重新进入外层模型循环
+{
+  const capabilityLogStart = diagLines.length;
+  const r = await runTestTurn(
+    '失败命令',
+    noApproval,
+    {},
+    new JsonFileSession(path.join(dir, 'completion-gate-budget-session.json')),
+    { ...cfg, permissionMode: 'full_access' },
+  );
+  const started = r.events.filter((e) => e.type === 'tool.started' && e.payload.toolName === 'run_command');
+  const gateRetries = r.events.filter((e) => e.type === 'run.progress' && e.payload.stage === 'completion_gate.retry');
+  const requestLines = diagLines.slice(capabilityLogStart).filter((line) => line.includes('[completion_gate]'));
+  console.log('[8d2] 完成门耗尽立即停止:status =', r.result.status, '| started =', started.length, '| gateRetries =', gateRetries.length);
+  if (r.result.status !== 'failed') {
+    throw new Error('持续失败的命令没有在完成门耗尽后返回 failed');
+  }
+  if (started.length !== 4 || gateRetries.length !== 3) {
+    throw new Error(`完成门耗尽后仍重复执行模型/工具: started=${started.length}, retries=${gateRetries.length}`);
+  }
+  if (requestLines.length !== 4 || !requestLines.at(-1)?.includes('已达到最大修复次数')) {
+    throw new Error('完成门耗尽没有记录终止日志');
+  }
+}
+
 // [8e] 通用完成验收:工具失败后模型假装完成 → runtime 反馈失败原因并驱动下一轮修正
 {
   await fs.writeFile(path.join(dir, 'fixed.txt'), '修正后的内容', 'utf8');
