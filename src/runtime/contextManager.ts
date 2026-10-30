@@ -140,6 +140,17 @@ export interface ContextCompactionResult {
   error?: string;
 }
 
+export interface ContextUsageSnapshot {
+  /** Estimated tokens already occupied by history plus fixed request overhead. */
+  usedTokens: number;
+  /** Effective configured context ceiling used as the percentage denominator. */
+  totalTokens: number;
+  /** Estimated occupied context at which local compaction is expected to run. */
+  compactionThresholdTokens?: number;
+  /** Percentage is intentionally allowed above 100 so over-budget state stays visible. */
+  percent: number;
+}
+
 export const LEGACY_CONTEXT_COMPACTION_DEFAULTS: Required<LegacyContextCompactionBudget> = {
   maxItems: 48,
   maxCharacters: 200_000,
@@ -153,6 +164,45 @@ export const LEGACY_CONTEXT_COMPACTION_DEFAULTS: Required<LegacyContextCompactio
 // context; a declared model window always takes precedence.
 export const UNKNOWN_CONTEXT_MAX_CHARACTERS = 80_000;
 export const UNKNOWN_CONTEXT_MAX_INPUT_TOKENS = 120_000;
+
+/**
+ * Estimate the next request's context occupancy using the same history
+ * estimator and calibration as automatic compaction.
+ */
+export function estimateContextUsage(
+  items: readonly AgentInputItem[],
+  profile?: ModelContextProfile,
+): ContextUsageSnapshot | undefined {
+  if (!profile) return undefined;
+  const contextWindow = positiveInteger(profile.contextWindowTokens);
+  const explicitInput = positiveInteger(profile.compaction?.maxInputTokens);
+  const unknownInput = positiveInteger(profile.compaction?.unknownMaxInputTokens);
+  const configuredTotals = [contextWindow, explicitInput]
+    .filter((value): value is number => value !== undefined);
+  const totalTokens = configuredTotals.length
+    ? Math.min(...configuredTotals)
+    : unknownInput;
+  if (totalTokens === undefined) return undefined;
+
+  const fixedOverheadTokens = Math.max(
+    nonNegativeInteger(profile.fixedRequestOverheadTokens),
+    nonNegativeInteger(profile.tokenCalibration?.fixedOverheadTokens),
+  );
+  const historyTokens = estimateItemsTokens(items, profile.tokenCalibration);
+  const usedTokens = historyTokens + fixedOverheadTokens;
+  const historyBudgetTokens = resolveInputTokenBudget(profile);
+  const compactionThresholdTokens = historyBudgetTokens === undefined
+    ? undefined
+    : Math.min(totalTokens, historyBudgetTokens + fixedOverheadTokens);
+  return {
+    usedTokens,
+    totalTokens,
+    ...(compactionThresholdTokens === undefined
+      ? {}
+      : { compactionThresholdTokens }),
+    percent: totalTokens > 0 ? (usedTokens / totalTokens) * 100 : 0,
+  };
+}
 
 export async function ensureContextCompacted(
   session: ContextManagedSession,

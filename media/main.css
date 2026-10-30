@@ -1124,12 +1124,26 @@ body.settings-open { overflow: hidden; }
 
 .composer-bar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
+  gap: 6px 8px;
   margin-top: 6px;
 }
-.composer-bar .left { display: flex; gap: 6px; align-items: center; }
-.composer-bar .right { display: flex; gap: 8px; align-items: center; }
+.composer-bar .left {
+  display: flex;
+  flex: 1 1 280px;
+  min-width: 0;
+  gap: 6px;
+  align-items: center;
+}
+.composer-bar .right {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+  align-items: center;
+  margin-left: auto;
+}
 .hidden { display: none !important; }
 
 .chip {
@@ -1201,6 +1215,71 @@ body.settings-open { overflow: hidden; }
   cursor: pointer;
 }
 .chip.model:hover { color: var(--fg); border-color: var(--accent); }
+
+.context-usage {
+  --context-progress: 0deg;
+  --context-usage-color: var(--accent);
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  min-height: 22px;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+  position: relative;
+}
+.context-usage-ring {
+  position: relative;
+  width: 13px;
+  height: 13px;
+  flex: 0 0 13px;
+  border-radius: 50%;
+  background: conic-gradient(
+    var(--context-usage-color) var(--context-progress),
+    color-mix(in srgb, var(--muted) 28%, transparent) 0
+  );
+}
+.context-usage-ring::after {
+  content: '';
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  background: var(--box);
+}
+.context-usage.warning { --context-usage-color: var(--vscode-editorWarning-foreground, #d89614); }
+.context-usage.critical { --context-usage-color: var(--vscode-errorForeground, #f66); }
+.context-usage.unknown { opacity: 0.6; }
+.context-usage::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  z-index: 24;
+  left: 50%;
+  bottom: calc(100% + 7px);
+  max-width: min(290px, 80vw);
+  padding: 5px 7px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--vscode-editorHoverWidget-background, var(--box));
+  color: var(--vscode-editorHoverWidget-foreground, var(--fg));
+  box-shadow: 0 5px 18px rgb(0 0 0 / 0.32);
+  font-size: 10px;
+  line-height: 1.35;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, 3px);
+  transition: opacity 0.12s, transform 0.12s;
+}
+.context-usage:hover::after,
+.context-usage:focus-visible::after {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
 
 .chip.action { cursor: pointer; }
 .chip.action:hover { color: var(--fg); border-color: var(--accent); }

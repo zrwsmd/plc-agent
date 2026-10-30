@@ -9,6 +9,7 @@ import {
   buildContextStateLedger,
   ensureContextCompacted,
   applyTokenEstimateCalibration,
+  estimateContextUsage,
   estimateItemsTokens,
   estimateItemsCharacters,
   estimateModelRequestTokenBreakdown,
@@ -163,6 +164,32 @@ try {
       }),
       115_904,
     );
+    const defaultUsageItems = [
+      { type: 'message', role: 'user', content: '检查 main.st' },
+    ];
+    const defaultUsage = estimateContextUsage(defaultUsageItems, {
+      fixedRequestOverheadTokens: 4_096,
+      compaction: { unknownMaxInputTokens: UNKNOWN_CONTEXT_MAX_INPUT_TOKENS },
+    });
+    assert.equal(defaultUsage.totalTokens, 120_000);
+    assert.equal(defaultUsage.compactionThresholdTokens, 120_000);
+    assert.equal(
+      defaultUsage.usedTokens,
+      estimateItemsTokens(defaultUsageItems) + 4_096,
+    );
+    assert.equal(
+      defaultUsage.percent,
+      (defaultUsage.usedTokens / defaultUsage.totalTokens) * 100,
+    );
+    const cappedUsage = estimateContextUsage(defaultUsageItems, {
+      contextWindowTokens: 200_000,
+      reservedOutputTokens: 4_096,
+      safetyMarginTokens: 1_024,
+      fixedRequestOverheadTokens: 4_096,
+      compaction: { maxInputTokens: 100_000 },
+    });
+    assert.equal(cappedUsage.totalTokens, 100_000);
+    assert.equal(cappedUsage.compactionThresholdTokens, 100_000);
     assert.equal(resolveInputTokenBudget({ contextWindowTokens: 4_000, reservedOutputTokens: 4_096 }), undefined);
     assert.deepEqual(LEGACY_CONTEXT_COMPACTION_DEFAULTS, {
       maxItems: 48,

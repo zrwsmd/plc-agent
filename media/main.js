@@ -21,6 +21,8 @@ const gearBtn = document.getElementById('gear');
 const modeChip = document.getElementById('mode-chip');
 const permissionMenuEl = document.getElementById('permission-menu');
 const modelChip = document.getElementById('model-chip');
+const contextUsageEl = document.getElementById('context-usage');
+const contextUsageLabelEl = document.getElementById('context-usage-label');
 const settingsEl = document.getElementById('settings');
 const setBaseEl = document.getElementById('set-base');
 const setKeyEl = document.getElementById('set-key');
@@ -2946,6 +2948,41 @@ function updateModelChip(model, vendorName) {
   modelChip.textContent = vendorName || model || '未配置';
 }
 
+function compactTokenCount(value) {
+  const tokens = Math.max(0, Number(value) || 0);
+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(tokens >= 10_000_000 ? 0 : 1)}M`;
+  if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(tokens >= 100_000 ? 0 : 1)}K`;
+  return String(Math.round(tokens));
+}
+
+function updateContextUsage(usage) {
+  const usedTokens = Number(usage?.usedTokens);
+  const totalTokens = Number(usage?.totalTokens);
+  if (!Number.isFinite(usedTokens) || !Number.isFinite(totalTokens) || totalTokens <= 0) {
+    contextUsageEl.classList.add('unknown');
+    contextUsageEl.style.setProperty('--context-progress', '0deg');
+    contextUsageLabelEl.textContent = '--%';
+    contextUsageEl.dataset.tooltip = '上下文用量暂不可用';
+    contextUsageEl.setAttribute('aria-label', contextUsageEl.dataset.tooltip);
+    return;
+  }
+  const percent = Math.max(0, Number(usage.percent) || (usedTokens / totalTokens) * 100);
+  const roundedPercent = Math.round(percent);
+  const progressDegrees = Math.min(360, percent * 3.6);
+  const threshold = Number(usage.compactionThresholdTokens);
+  contextUsageEl.classList.remove('unknown', 'warning', 'critical');
+  if (percent >= 90) contextUsageEl.classList.add('critical');
+  else if (percent >= 70) contextUsageEl.classList.add('warning');
+  contextUsageEl.style.setProperty('--context-progress', `${progressDegrees}deg`);
+  contextUsageLabelEl.textContent = `${roundedPercent}%`;
+  const usageDetail = `${percent.toFixed(1)}% · ${compactTokenCount(usedTokens)} / ${compactTokenCount(totalTokens)} tokens`;
+  const thresholdDetail = Number.isFinite(threshold) && threshold > 0
+    ? `，自动压缩阈值约 ${compactTokenCount(threshold)} tokens`
+    : '';
+  contextUsageEl.dataset.tooltip = usageDetail;
+  contextUsageEl.setAttribute('aria-label', `预计上下文 ${usageDetail}${thresholdDetail}`);
+}
+
 const builtinProviderLabels = {
   core: '核心',
   st: 'ST',
@@ -4457,6 +4494,9 @@ window.addEventListener('message', (event) => {
       inputEl.focus();
       break;
     }
+    case 'contextUsage':
+      updateContextUsage(msg);
+      break;
     case 'preflight':
       showPreflightStage(msg);
       setRuntimeMode('running');

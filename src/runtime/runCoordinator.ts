@@ -40,10 +40,12 @@ import { LOAD_SKILL_TOOL_NAME } from './skills/skillCatalog';
 import { AgentEventFactory, type AgentProtocolEvent } from '../protocol/events';
 import { createAgentResult, type ToolResult } from '../protocol/results';
 import {
+  estimateContextUsage,
   ensureContextCompacted,
   resolveContextCompactionPolicy,
   type ContextCompactionResult,
   type ContextManagerOptions,
+  type ContextUsageSnapshot,
 } from './contextManager';
 import {
   createManagedContextSession,
@@ -685,6 +687,22 @@ export class RunCoordinator {
       !!this.initializeOperation ||
       this.pendingClarifications.size > 0 ||
       !!(await this.store.getActive());
+  }
+
+  /** Returns a calibrated estimate of the context that the next request will occupy. */
+  async getContextUsage(config: DurableRunConfig): Promise<ContextUsageSnapshot | undefined> {
+    const routeKey = modelContextCalibrationRouteKey(config);
+    const persistedContext = (await this.store.getActive() ?? await this.store.getLast())
+      ?.config.modelContext;
+    const persistedCalibration = persistedContext?.tokenCalibrations?.[routeKey]
+      ?? persistedContext?.tokenCalibration;
+    const modelContext = persistedCalibration?.routeKey === routeKey
+      ? {
+        ...config.modelContext,
+        tokenCalibration: persistedCalibration,
+      }
+      : config.modelContext;
+    return estimateContextUsage(await this.session.getItems(), modelContext);
   }
 
   /**

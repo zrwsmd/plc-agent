@@ -113,6 +113,7 @@ import {
  *                   {type:'approval', name, args}(审批卡片) / {type:'history', messages}
  *                   {type:'settings', baseUrl, model, apiFormat, vendorId, vendors, hasKey, requestId?}
  *                   {type:'contextCompaction', state, result?, error?}
+ *                   {type:'contextUsage', usedTokens, totalTokens, percent, compactionThresholdTokens?}
  *                   {type:'settingsSaved', model, apiFormat, vendorId} / {type:'settingsError', message}
  *                   {type:'permissionModeSaved', permissionMode}
  *                   {type:'mcpStatus', name, status, error?, toolCount?}
@@ -170,6 +171,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
    */
   private clipboardWriteChain: Promise<void> = Promise.resolve();
   private clipboardLatestToken = 0;
+  private contextUsageRevision = 0;
 
   constructor(private readonly context: vscode.ExtensionContext) {
     // Keep run/session/effect state isolated per workspace. A no-folder chat
@@ -192,6 +194,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         event.affectsConfiguration('plcAgent.permissionMode')
       ) {
         void this.sendSettingsToWebview();
+      }
+      if (event.affectsConfiguration('plcAgent.context')) {
+        void this.postContextUsage();
       }
     }));
   }
@@ -324,6 +329,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     await this.coordinator!.clear();
     await this.sessionCatalog.touch(this.activeSessionId);
     await this.postSessions();
+    await this.postContextUsage();
   }
 
   /**
@@ -361,6 +367,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.activateRuntime(index.activeSessionId);
     await this.postSessions();
     await this.coordinator!.initialize();
+    await this.postContextUsage();
   }
 
   private async ensureRuntime(): Promise<void> {
@@ -380,6 +387,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       emit: (event) => {
         if (this.activeSessionId === sessionId) this.post(event);
         this.handleProjectWindowRuntimeEvent(sessionId, event);
+        if (this.activeSessionId === sessionId && shouldRefreshContextUsage(event)) {
+          void this.postContextUsage(sessionId);
+        }
       },
       log: (line) => this.log.appendLine(line),
       decisionService: this.decisionService,
@@ -496,6 +506,29 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  private async postContextUsage(expectedSessionId = this.activeSessionId): Promise<void> {
+    const revision = ++this.contextUsageRevision;
+    const coordinator = this.coordinator;
+    if (!coordinator || !expectedSessionId || expectedSessionId !== this.activeSessionId) return;
+    try {
+      const live = await this.getConfig();
+      const paths = this.sessionCatalog.pathsFor(expectedSessionId);
+      const snapshot = await coordinator.getContextUsage(
+        this.createRunConfig(live, paths, this.workspaceRoots()),
+      );
+      if (
+        revision !== this.contextUsageRevision
+        || expectedSessionId !== this.activeSessionId
+        || coordinator !== this.coordinator
+      ) return;
+      this.post(snapshot ? { type: 'contextUsage', ...snapshot } : { type: 'contextUsage' });
+    } catch (error) {
+      this.log.appendLine(
+        `[context] 用量估算失败: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   private async canLeaveActiveSession(): Promise<boolean> {
     await this.ensureRuntime();
     await this.coordinator!.initialize();
@@ -518,6 +551,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.activateRuntime(session.id);
     await this.postSessions();
     await this.coordinator!.initialize();
+    await this.postContextUsage();
   }
 
   private async switchSession(sessionId: string): Promise<void> {
@@ -528,6 +562,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.activateRuntime(sessionId);
     await this.postSessions();
     await this.coordinator!.initialize();
+    await this.postContextUsage();
   }
 
   private async renameSession(sessionId: string, title: string): Promise<void> {
@@ -545,6 +580,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.activateRuntime(index.activeSessionId);
       await this.postSessions();
       await this.coordinator!.initialize();
+      await this.postContextUsage();
       return;
     }
     await this.postSessions();
@@ -1034,6 +1070,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           model: item.model,
         })),
       });
+      await this.postContextUsage();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.post({ type: 'settingsError', message: `保存模型配置失败: ${message}` });
@@ -1065,6 +1102,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         undefined,
         saved.activeVendorId,
       );
+      await this.postContextUsage();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.post({ type: 'settingsError', message: `删除供应商失败: ${message}` });
@@ -1417,6 +1455,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       await this.postSessions();
       this.log.appendLine(`[context] 手动上下文压缩${result.compacted ? '完成' : '无需执行'}`);
       this.post({ type: 'contextCompaction', state: 'completed', result });
+      await this.postContextUsage();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.log.appendLine(`[context] 手动上下文压缩失败: ${message}`);
@@ -1661,6 +1700,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             </div>
           </div>
           <span class="chip model" id="model-chip" title="点击配置模型">未配置</span>
+          <span id="context-usage" class="context-usage unknown" role="status" tabindex="0" aria-live="polite" aria-label="正在估算上下文用量" data-tooltip="正在估算上下文用量">
+            <span class="context-usage-ring" aria-hidden="true"></span>
+            <span id="context-usage-label" class="context-usage-label">--%</span>
+          </span>
           <span class="chip action" id="newchat" title="创建新会话,保留历史会话">＋ 新会话</span>
         </div>
         <div class="right">
@@ -1693,6 +1736,22 @@ function vendorNameFromBaseUrl(baseUrl: string): string | undefined {
 function isStringRecord(value: unknown): value is Record<string, string> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
     && Object.values(value).every((item) => typeof item === 'string');
+}
+
+function shouldRefreshContextUsage(event: RuntimeEvent): boolean {
+  if (
+    event.type === 'done'
+    || event.type === 'cancelled'
+    || event.type === 'paused'
+    || event.type === 'refused'
+    || event.type === 'error'
+    || event.type === 'cleared'
+  ) return true;
+  if (event.type !== 'agentEvent') return false;
+  const protocolEvent = event.event as AgentProtocolEvent;
+  if (protocolEvent.type !== 'run.progress') return false;
+  const stage = (protocolEvent.payload as { stage?: unknown }).stage;
+  return stage === 'context.compaction.completed';
 }
 
 function isContinueRequest(text: string): boolean {
