@@ -25,6 +25,7 @@ const settingsEl = document.getElementById('settings');
 const setBaseEl = document.getElementById('set-base');
 const setKeyEl = document.getElementById('set-key');
 const setModelEl = document.getElementById('set-model');
+const setContextWindowEl = document.getElementById('set-context-window');
 const setFormatEl = document.getElementById('set-format');
 const setVisionModeEl = document.getElementById('set-vision-mode');
 const setVendorEl = document.getElementById('set-vendor');
@@ -2890,6 +2891,7 @@ function startNewVendor() {
   setVendorNameEl.value = '';
   setBaseEl.value = '';
   setModelEl.value = '';
+  setContextWindowEl.value = '';
   setKeyEl.value = '';
   hasSavedKey = false;
   setKeyEl.placeholder = '必填';
@@ -2929,6 +2931,7 @@ setSaveEl.addEventListener('click', () => {
     baseUrl: setBaseEl.value,
     apiKey: setKeyEl.value, // 留空 = 不修改已保存的 key
     model: setModelEl.value,
+    contextWindowTokens: setContextWindowEl.value,
     visionMode: setVisionModeEl?.value || 'auto',
     provider: providerForFormat(setFormatEl.value),
     apiFormat: setFormatEl.value,
@@ -4764,6 +4767,7 @@ window.addEventListener('message', (event) => {
       hasSavedKey = !!msg.hasKey;
       setBaseEl.value = msg.baseUrl || '';
       setModelEl.value = msg.model || '';
+      setContextWindowEl.value = msg.contextWindowTokens || '';
       setFormatEl.value = msg.apiFormat || (msg.baseUrl ? 'chat_completions' : 'responses');
       if (setVisionModeEl) setVisionModeEl.value = ['auto', 'enabled', 'disabled'].includes(msg.visionMode) ? msg.visionMode : 'auto';
       updatePermissionMode(msg.permissionMode || 'ask');

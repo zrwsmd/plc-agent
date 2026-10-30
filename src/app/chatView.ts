@@ -592,10 +592,34 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       minConfidence: cfg.get<number>('jev.minConfidence') ?? undefined,
     };
     const configuredContextWindowTokens = cfg.get<number>('context.contextWindowTokens') ?? 0;
+    const promptCache = {
+      enabled: cfg.get<boolean>('promptCache.enabled') ?? false,
+      ttl: cfg.get<'30m'>('promptCache.ttl') ?? '30m',
+    };
+    const configuredPermissionMode = cfg.get<unknown>('permissionMode');
+    const permissionMode: PermissionMode = isPermissionMode(configuredPermissionMode)
+      ? configuredPermissionMode
+      : 'ask';
+    const workspaceRoots = this.workspaceRoots();
+    let mcp = emptyMcpSettings();
+    try {
+      mcp = await loadMcpSettings(workspaceRoots);
+    } catch {
+      mcp = emptyMcpSettings();
+    }
+    const vendor = resolveStoredVendor(savedProfiles, {
+      vendorId: requestedVendorId,
+      provider: requestedProvider,
+      apiFormat: requestedApiFormat,
+    });
+    const effectiveContextWindowTokens = vendor?.contextWindowTokens
+      ?? (configuredContextWindowTokens > 0
+        ? Math.floor(configuredContextWindowTokens)
+        : undefined);
     const modelContext = {
-      ...(configuredContextWindowTokens > 0
-        ? { contextWindowTokens: Math.floor(configuredContextWindowTokens) }
-        : {}),
+      ...(effectiveContextWindowTokens === undefined
+        ? {}
+        : { contextWindowTokens: effectiveContextWindowTokens }),
       reservedOutputTokens: Math.max(
         0,
         Math.floor(cfg.get<number>('context.reservedOutputTokens') ?? 4_096),
@@ -639,26 +663,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         ),
       },
     };
-    const promptCache = {
-      enabled: cfg.get<boolean>('promptCache.enabled') ?? false,
-      ttl: cfg.get<'30m'>('promptCache.ttl') ?? '30m',
-    };
-    const configuredPermissionMode = cfg.get<unknown>('permissionMode');
-    const permissionMode: PermissionMode = isPermissionMode(configuredPermissionMode)
-      ? configuredPermissionMode
-      : 'ask';
-    const workspaceRoots = this.workspaceRoots();
-    let mcp = emptyMcpSettings();
-    try {
-      mcp = await loadMcpSettings(workspaceRoots);
-    } catch {
-      mcp = emptyMcpSettings();
-    }
-    const vendor = resolveStoredVendor(savedProfiles, {
-      vendorId: requestedVendorId,
-      provider: requestedProvider,
-      apiFormat: requestedApiFormat,
-    });
     const configuredProvider = cfg.get<unknown>('provider');
     const provider = vendor?.provider
       ?? requestedProvider
@@ -762,6 +766,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       visionMode,
       vendorId: vendor?.id,
       vendorName: vendor?.name,
+      vendorContextWindowTokens: vendor?.contextWindowTokens,
       vendors: listStoredVendors(savedProfiles).map((item) => ({
         id: item.id,
         name: item.name,
@@ -922,6 +927,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         provider: cfg.provider,
         apiFormat: cfg.apiFormat,
         visionMode: cfg.visionMode,
+        contextWindowTokens: cfg.vendorContextWindowTokens ?? '',
         vendorId: cfg.vendorId ?? '',
         vendorName: cfg.vendorName ?? '',
         vendors: cfg.vendors ?? [],
@@ -949,6 +955,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     vendorId?: string;
     name?: string;
     visionMode?: unknown;
+    contextWindowTokens?: unknown;
   }): Promise<void> {
     const baseUrl = (msg.baseUrl ?? '').trim().replace(/\/+$/, '');
     const model = (msg.model ?? '').trim();
@@ -960,7 +967,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const provider = isAgentProvider(msg.provider)
       ? msg.provider
       : providerForApiFormat(apiFormat);
-      const visionMode = isVisionMode(msg.visionMode) ? msg.visionMode : undefined;
+    const visionMode = isVisionMode(msg.visionMode) ? msg.visionMode : undefined;
+    const rawContextWindowTokens = typeof msg.contextWindowTokens === 'string'
+      ? msg.contextWindowTokens.trim()
+      : msg.contextWindowTokens;
+    const contextWindowTokens = rawContextWindowTokens === '' || rawContextWindowTokens === undefined
+      ? undefined
+      : Number(rawContextWindowTokens);
+    if (contextWindowTokens !== undefined
+      && (!Number.isInteger(contextWindowTokens) || contextWindowTokens <= 0)) {
+      this.post({ type: 'settingsError', message: '上下文窗口必须留空或填写正整数' });
+      return;
+    }
     try {
       resolveApiFormat(baseUrl, apiFormat, provider);
       const current = this.context.globalState.get<unknown>(API_SETTINGS_STATE_KEY);
@@ -981,6 +999,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         apiFormat,
         baseUrl,
         model,
+        ...(contextWindowTokens === undefined ? {} : { contextWindowTokens }),
       });
       await this.context.globalState.update(
         API_SETTINGS_STATE_KEY,
@@ -1006,6 +1025,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         apiFormat,
         vendorId,
         vendorName: name,
+        contextWindowTokens: contextWindowTokens ?? '',
         vendors: listStoredVendors(saved).map((item) => ({
           id: item.id,
           name: item.name,
@@ -1536,6 +1556,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
               <label>Base URL<input id="set-base" type="text" placeholder="https://你的网关/v1" spellcheck="false" /></label>
               <label>API Key<input id="set-key" type="password" placeholder="未设置" spellcheck="false" /></label>
               <label>Model<input id="set-model" type="text" placeholder="gpt-4o-mini" spellcheck="false" /></label>
+              <label>上下文窗口（tokens，可选）<input id="set-context-window" type="number" min="1" step="1" placeholder="留空自动处理" /></label>
               <label>图片输入<select id="set-vision-mode">
                 <option value="auto">自动识别模型能力</option>
                 <option value="enabled">强制启用</option>

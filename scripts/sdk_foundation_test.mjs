@@ -460,6 +460,7 @@ const firstChatVendor = saveStoredVendor(undefined, {
   apiFormat: 'chat_completions',
   baseUrl: 'https://developer.amd.com.cn/v1',
   model: 'Qwen3.8-Flash-Next',
+  contextWindowTokens: 200_000,
 });
 const twoChatVendors = saveStoredVendor(firstChatVendor, {
   id: 'v_deepseek',
@@ -470,6 +471,14 @@ const twoChatVendors = saveStoredVendor(firstChatVendor, {
   model: 'deepseek-chat',
 });
 assert.equal(listStoredVendors(twoChatVendors, 'chat_completions').length, 2);
+assert.equal(
+  resolveStoredVendor(twoChatVendors, { vendorId: 'v_amd' })?.contextWindowTokens,
+  200_000,
+);
+assert.equal(
+  getStoredApiProfile(twoChatVendors, 'openai', 'chat_completions')?.contextWindowTokens,
+  undefined,
+);
 assert.equal(twoChatVendors.activeVendorId, 'v_deepseek');
 assert.equal(
   resolveStoredVendor(twoChatVendors, { apiFormat: 'chat_completions' })?.id,
@@ -481,6 +490,7 @@ assert.equal(listStoredVendors(remainingChatVendor, 'chat_completions').length, 
 assert.deepEqual(getStoredApiProfile(remainingChatVendor, 'openai', 'chat_completions'), {
   baseUrl: 'https://developer.amd.com.cn/v1',
   model: 'Qwen3.8-Flash-Next',
+  contextWindowTokens: 200_000,
 });
 
 const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-agent-write-'));

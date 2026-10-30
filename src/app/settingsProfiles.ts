@@ -25,6 +25,7 @@ export const WEB_SEARCH_LEGACY_API_KEY_SECRET_KEY = 'webSearchApiKey';
 export interface ApiSettingsProfile {
   baseUrl: string;
   model: string;
+  contextWindowTokens?: number;
 }
 
 export interface ApiVendorProfile {
@@ -34,6 +35,7 @@ export interface ApiVendorProfile {
   apiFormat: AgentApiFormat;
   baseUrl: string;
   model: string;
+  contextWindowTokens?: number;
 }
 
 const API_FORMATS: readonly AgentApiFormat[] = [
@@ -66,11 +68,20 @@ function normalizeBaseUrl(value: unknown): string | undefined {
   return normalized?.replace(/\/+$/, '');
 }
 
+function normalizePositiveInteger(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0
+    ? value
+    : undefined;
+}
+
 function normalizeProfile(value: unknown): ApiSettingsProfile | undefined {
   if (!isRecord(value)) return undefined;
   return {
     baseUrl: normalizeBaseUrl(value.baseUrl) ?? '',
     model: normalizeString(value.model) ?? '',
+    ...(normalizePositiveInteger(value.contextWindowTokens) === undefined
+      ? {}
+      : { contextWindowTokens: normalizePositiveInteger(value.contextWindowTokens) }),
   };
 }
 
@@ -123,6 +134,9 @@ function normalizeVendor(value: unknown): ApiVendorProfile | undefined {
     apiFormat,
     baseUrl: normalizeBaseUrl(value.baseUrl) ?? '',
     model: normalizeString(value.model) ?? '',
+    ...(normalizePositiveInteger(value.contextWindowTokens) === undefined
+      ? {}
+      : { contextWindowTokens: normalizePositiveInteger(value.contextWindowTokens) }),
   };
 }
 
@@ -143,6 +157,9 @@ function vendorsFromProfiles(
         apiFormat: format,
         baseUrl: profile.baseUrl,
         model: profile.model,
+        ...(profile.contextWindowTokens === undefined
+          ? {}
+          : { contextWindowTokens: profile.contextWindowTokens }),
       });
     }
   }
@@ -347,6 +364,9 @@ function syncProfileSlot(
       [vendor.apiFormat]: {
         baseUrl: vendor.baseUrl,
         model: vendor.model,
+        ...(vendor.contextWindowTokens === undefined
+          ? {}
+          : { contextWindowTokens: vendor.contextWindowTokens }),
       },
     },
   };
@@ -385,6 +405,9 @@ export function saveStoredVendor(
     apiFormat: vendor.apiFormat,
     baseUrl: vendor.baseUrl.trim().replace(/\/+$/, ''),
     model: vendor.model.trim(),
+    ...(normalizePositiveInteger(vendor.contextWindowTokens) === undefined
+      ? {}
+      : { contextWindowTokens: normalizePositiveInteger(vendor.contextWindowTokens) }),
   };
   const vendors = settings.vendors.some((item) => item.id === normalized.id)
     ? settings.vendors.map((item) => item.id === normalized.id ? normalized : item)
@@ -456,6 +479,9 @@ export function saveStoredApiProfile(
     apiFormat: format,
     baseUrl: profile.baseUrl,
     model: profile.model,
+    ...(profile.contextWindowTokens === undefined
+      ? {}
+      : { contextWindowTokens: profile.contextWindowTokens }),
   });
 }
 
