@@ -36,6 +36,8 @@ export interface LegacyContextCompactionBudget {
 export interface ContextCompactionBudget extends LegacyContextCompactionBudget {
   /** Explicit effective input-token ceiling; 0/unset uses the model profile. */
   maxInputTokens?: number;
+  /** Token ceiling used when the model window is unknown and no explicit budget is set. */
+  unknownMaxInputTokens?: number;
 }
 
 export interface TokenEstimateCalibration {
@@ -146,10 +148,11 @@ export const LEGACY_CONTEXT_COMPACTION_DEFAULTS: Required<LegacyContextCompactio
   maxSummaryInputCharacters: 60_000,
 };
 
-// Unknown/local models use a separate conservative ceiling. The normal
-// maxCharacters setting remains 200k for legacy callers and known-window
-// profiles; callers can explicitly raise this value when the model supports it.
+// Unknown/local models use a token ceiling instead of the old character-only
+// fallback. Callers can explicitly raise it when the model supports a larger
+// context; a declared model window always takes precedence.
 export const UNKNOWN_CONTEXT_MAX_CHARACTERS = 80_000;
+export const UNKNOWN_CONTEXT_MAX_INPUT_TOKENS = 120_000;
 
 export async function ensureContextCompacted(
   session: ContextManagedSession,
@@ -432,6 +435,7 @@ export function resolveInputTokenBudget(
   if (!profile) return undefined;
 
   const explicit = positiveInteger(profile.compaction?.maxInputTokens);
+  const unknownInput = positiveInteger(profile.compaction?.unknownMaxInputTokens);
   const contextWindow = positiveInteger(profile.contextWindowTokens);
   const fixedRequestOverhead = Math.max(
     nonNegativeInteger(profile.fixedRequestOverheadTokens),
@@ -450,7 +454,14 @@ export function resolveInputTokenBudget(
     ? undefined
     : explicit - fixedRequestOverhead;
   if (explicitAvailable !== undefined && explicitAvailable <= 0) return undefined;
-  if (explicitAvailable === undefined) return derived;
+  if (explicitAvailable === undefined) {
+    if (derived !== undefined) return derived;
+    if (unknownInput !== undefined) {
+      const unknownAvailable = unknownInput - fixedRequestOverhead;
+      return unknownAvailable > 0 ? unknownAvailable : undefined;
+    }
+    return undefined;
+  }
   if (derived === undefined) return explicitAvailable;
   return Math.min(explicitAvailable, derived);
 }

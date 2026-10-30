@@ -42,6 +42,7 @@ import {
   type AgentProvider,
 } from '../runtime/modelAdapter';
 import { isPermissionMode, type PermissionMode } from '../runtime/agentConfig';
+import { UNKNOWN_CONTEXT_MAX_INPUT_TOKENS } from '../runtime/contextManager';
 import {
   isVisionMode,
   normalizeUserMessageInput,
@@ -611,6 +612,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         maxInputTokens: Math.max(
           0,
           Math.floor(cfg.get<number>('context.compaction.maxInputTokens') ?? 0),
+        ),
+        unknownMaxInputTokens: Math.max(
+          0,
+          Math.floor(
+            cfg.get<number>('context.compaction.unknownMaxInputTokens') ??
+            UNKNOWN_CONTEXT_MAX_INPUT_TOKENS,
+          ),
         ),
         maxItems: Math.max(1, Math.floor(cfg.get<number>('context.compaction.maxItems') ?? 48)),
         maxCharacters: Math.max(

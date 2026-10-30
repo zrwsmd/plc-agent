@@ -285,7 +285,7 @@ function isConfidence(value: unknown): value is number {
 
 function isContextCompactionBudget(value: unknown): boolean {
   if (!isRecord(value)) return false;
-  for (const key of ['maxInputTokens', 'maxItems', 'maxCharacters', 'unknownMaxCharacters', 'recentItems', 'maxSummaryInputCharacters'] as const) {
+  for (const key of ['maxInputTokens', 'unknownMaxInputTokens', 'maxItems', 'maxCharacters', 'unknownMaxCharacters', 'recentItems', 'maxSummaryInputCharacters'] as const) {
     if (value[key] !== undefined && !isFiniteNonNegative(value[key])) return false;
   }
   return true;

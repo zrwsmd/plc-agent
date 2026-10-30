@@ -56,6 +56,7 @@ const config = {
     },
     compaction: {
       maxInputTokens: 100_000,
+      unknownMaxInputTokens: 120_000,
       maxItems: 48,
       maxCharacters: 80_000,
       recentItems: 16,
@@ -103,6 +104,7 @@ if (
   restored.config.modelContext.tokenCalibration?.historyFactor !== 1.08 ||
   restored.config.modelContext.tokenCalibrations?.[calibrationRouteKey]?.fixedOverheadTokens !== 3_500 ||
   restored.config.modelContext.compaction.maxInputTokens !== 100_000 ||
+  restored.config.modelContext.compaction.unknownMaxInputTokens !== 120_000 ||
   restored.config.modelContext.compaction?.maxItems !== 48 ||
   restored.config.modelContext.compaction.recentItems !== 16
 ) {

@@ -18,6 +18,7 @@ import {
   JsonFileSession,
   LEGACY_CONTEXT_COMPACTION_DEFAULTS,
   UNKNOWN_CONTEXT_MAX_CHARACTERS,
+  UNKNOWN_CONTEXT_MAX_INPUT_TOKENS,
   modelContextCalibrationRouteKey,
   parseContextStateLedgerItem,
   resolveRecentTurnBoundary,
@@ -153,6 +154,14 @@ try {
         compaction: { maxInputTokens: 10_000 },
       }),
       10_000,
+    );
+    assert.equal(UNKNOWN_CONTEXT_MAX_INPUT_TOKENS, 120_000);
+    assert.equal(
+      resolveInputTokenBudget({
+        fixedRequestOverheadTokens: 4_096,
+        compaction: { unknownMaxInputTokens: UNKNOWN_CONTEXT_MAX_INPUT_TOKENS },
+      }),
+      115_904,
     );
     assert.equal(resolveInputTokenBudget({ contextWindowTokens: 4_000, reservedOutputTokens: 4_096 }), undefined);
     assert.deepEqual(LEGACY_CONTEXT_COMPACTION_DEFAULTS, {
